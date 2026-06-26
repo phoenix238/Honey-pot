@@ -55,7 +55,7 @@ const today=()=>new Date().toISOString().split('T')[0];
 const datesClose=(a,b)=>{if(!a||!b)return false;const da=new Date(String(a).slice(0,10)).getTime(),db=new Date(String(b).slice(0,10)).getTime();return isFinite(da)&&isFinite(db)&&Math.abs(da-db)<6*86400000;};
 const fmtD=d=>d?new Date(d+'T12:00:00').toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}):'';
 const mkId=()=>Date.now().toString(36)+Math.random().toString(36).slice(2);
-const PROXY_URL='https://honey-proxy.YOUR-ACCOUNT.workers.dev';
+const PROXY_URL='https://honey-proxy.phoenix-2bc.workers.dev';
 const aiScanImage=async(dataUrl,isPdf)=>{
   const base64=dataUrl.split(',')[1];
   const mediaType=isPdf?'application/pdf':(dataUrl.match(/data:([^;]+);/)?.[1]||'image/jpeg');
