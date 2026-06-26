@@ -50,30 +50,13 @@ const EXPENSE_CATS=[
   ['other','Other']
 ];
 const catLabel=k=>{const f=EXPENSE_CATS.find(c=>c[0]===k);return f?f[1]:'Uncategorised';};
-// Known-merchant auto-categorisation for bank feed tagging (TfL → travel, etc.)
-const MERCHANT_CATS=[
-  [/TFL|TRANSPORT FOR LONDON|OYSTER/i,'travel','TfL'],
-  [/UBER(?! ?EATS)|BOLT(?! ?FOOD)|FREENOW|FREE NOW/i,'travel','Taxi'],
-  [/TRAINLINE|NATIONAL RAIL|GWR|AVANTI|LNER|NORTHERN RAIL|SOUTHEASTERN|SOUTHERN RAIL|THAMESLINK|CROSSCOUNTRY|EUROSTAR|MERSEYRAIL|SCOTRAIL|STAGECOACH|MEGABUS|NATIONAL EXPRESS/i,'travel','Rail/Coach'],
-  [/EASYJET|RYANAIR|BRITISH AIRWAYS|JET2|WIZZ AIR/i,'travel','Flights'],
-  [/SHELL|ESSO|\bBP\b|TEXACO|GULF OIL/i,'travel','Fuel'],
-  [/ADOBE|FIGMA|CANVA|DROPBOX|NOTION|SLACK|ZOOM|GOOGLE (ONE|STORAGE|WORKSPACE|CLOUD)|MICROSOFT|OPENAI|ANTHROPIC|GITHUB|SQUARESPACE|WIX|MAILCHIMP|1PASSWORD|BACKBLAZE/i,'software','Software'],
-  [/\bEE\b|\bO2\b|VODAFONE|\bTHREE\b|GIFFGAFF|PLUSNET|VIRGIN MEDIA|TALKTALK|\bBT\b|SKY (BROADBAND|MOBILE)/i,'phone','Phone/Internet'],
-  [/ROYAL MAIL|POST OFFICE|PARCELFORCE|EVRI|HERMES|\bDPD\b|\bDHL\b|\bUPS\b|FEDEX/i,'postage','Postage'],
-  [/SCREWFIX|TOOLSTATION|B&Q|B AND Q|WICKES|TRAVIS PERKINS|JEWSON/i,'materials','Materials'],
-  [/PRET|COSTA|STARBUCKS|CAFFE NERO|GREGGS|LEON\b/i,'meals','Coffee/Meals'],
-  [/CURRYS|ARGOS|APPLE STORE|SCAN COMPUTERS|RICHER SOUNDS|CEX\b/i,'equipment','Equipment'],
-  [/IKEA|RYMAN|PAPERCHASE|WHSMITH|STAPLES|VIKING DIRECT/i,'office','Office'],
-  [/COMPANIES HOUSE|HMRC FEE/i,'professional','Professional'],
-  [/DOMAIN|GODADDY|NAMECHEAP|123-REG|CLOUDFLARE|NETLIFY|VERCEL/i,'website','Website']
-];
-const guessCat=t=>{const s=((t.counterParty||'')+' '+(t.ref||''));for(const[re,cat,label]of MERCHANT_CATS){if(re.test(s))return{cat,label};}return null;};
 const fmt=n=>'£'+Math.max(0,n||0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g,',');
 const today=()=>new Date().toISOString().split('T')[0];
 const datesClose=(a,b)=>{if(!a||!b)return false;const da=new Date(String(a).slice(0,10)).getTime(),db=new Date(String(b).slice(0,10)).getTime();return isFinite(da)&&isFinite(db)&&Math.abs(da-db)<6*86400000;};
 const fmtD=d=>d?new Date(d+'T12:00:00').toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}):'';
 const mkId=()=>Date.now().toString(36)+Math.random().toString(36).slice(2);
-const aiScanImage=async(dataUrl,isPdf,apiKey)=>{
+const PROXY_URL='https://honey-proxy.YOUR-ACCOUNT.workers.dev';
+const aiScanImage=async(dataUrl,isPdf)=>{
   const base64=dataUrl.split(',')[1];
   const mediaType=isPdf?'application/pdf':(dataUrl.match(/data:([^;]+);/)?.[1]||'image/jpeg');
   const catList=EXPENSE_CATS.map(c=>c[0]).join('|');
@@ -81,7 +64,7 @@ const aiScanImage=async(dataUrl,isPdf,apiKey)=>{
   const content=isPdf
     ?[{type:"document",source:{type:"base64",media_type:"application/pdf",data:base64}},{type:"text",text:prompt}]
     :[{type:"image",source:{type:"base64",media_type:mediaType,data:base64}},{type:"text",text:prompt}];
-  const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:500,messages:[{role:"user",content}]})});
+  const res=await fetch(PROXY_URL,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:500,messages:[{role:"user",content}]})});
   const data=await res.json();
   if(data.error)throw new Error(data.error.message||'API error');
   const txt=(data.content||[]).map(b=>b.text||'').join('').trim().replace(/```json|```/g,'').trim();
@@ -126,166 +109,8 @@ const Sheets={
   async sendEmail(to,subject,body,docUrl){if(!this._url||!to)return{ok:false};try{const u=this._url+'?action=sendInvoice&to='+encodeURIComponent(to)+'&subject='+encodeURIComponent(subject||'')+'&body='+encodeURIComponent(body||'')+'&docUrl='+encodeURIComponent(docUrl||'');return await this._jsonp(u,15000);}catch(e){return{ok:false,error:e.message};}}
 };
 
-// ── STARLING ─────────────────────────────────────────────────────────────────
-const Starling={
-  _token:'',
-  _base:'https://api.starlingbank.com/api/v2',
-  init(token,sandbox,sheetsUrl){this._token=token||'';this._sandbox=!!sandbox;this._base=(sandbox?'https://api-sandbox.starlingbank.com':'https://api.starlingbank.com')+'/api/v2';if(sheetsUrl!==undefined)Sheets.init(sheetsUrl);},
-  async _get(path){
-    if(!this._token)return null;
-    try{
-      if(Sheets._url&&!this._sandbox){
-        const d=await Sheets._jsonp(Sheets._url+'?action=starlingGet&path='+encodeURIComponent(path)+'&token='+encodeURIComponent(this._token),15000);
-        if(d?.error){const err=new Error(d.error);err.status=d.status;throw err;}
-        return d;
-      }
-      const r=await fetch(this._base+path,{headers:{'Authorization':'Bearer '+this._token,'Accept':'application/json'}});
-      if(!r.ok){const err=new Error('HTTP '+r.status);err.status=r.status;throw err;}
-      return await r.json();
-    }catch(e){const err=new Error(e.message||'Network error');err.status=e.status;throw err;}
-  },
-  async getAccounts(){try{return this._get('/accounts');}catch(e){throw e;}},
-  async getTransactions(accountUid,categoryUid,from){
-    return this._get(`/feed/account/${accountUid}/category/${categoryUid}?changesSince=${from}`);
-  },
-  async fetchRecent(days=90){
-    const accs=await this.getAccounts();
-    if(!accs?.accounts?.length)return null;
-    const from=new Date();from.setDate(from.getDate()-days);
-    // Only fetch feed from PRIMARY account — savings/non-primary accounts have no feed
-    const primary=accs.accounts.find(a=>a.accountType==='PRIMARY')||accs.accounts[0];
-    if(!primary?.accountUid||!primary?.defaultCategory)throw new Error('Could not read account/category UID from Starling — try refreshing.');
-    const feeds=await Promise.all([primary].map(acc=>this.getTransactions(acc.accountUid,acc.defaultCategory,from.toISOString()).catch(e=>{const err=new Error(e?.status===403?'Token missing transaction:read scope (403) — re-generate your token at developer.starlingbank.com and tick that scope.':e?.status===401?'Token invalid or expired (401) — generate a new one.':'Could not fetch transactions: '+(e?.message||'network error'));err.status=e?.status;throw err;})));
-    const txns=[];
-    feeds.forEach(feed=>{
-      if(feed?.feedItems){
-        feed.feedItems.forEach(t=>{
-          if(t.status==='REVERSED')return;
-          txns.push({id:t.feedItemUid,date:(t.transactionTime||t.settlementTime||'').split('T')[0],amount:(t.amount?.minorUnits||0)/100,direction:t.direction,ref:t.reference||'',counterParty:t.counterPartyName||'',status:t.status});
-        });
-      }
-    });
-    return txns;
-  },
-  async getSavingsGoals(){
-    let accs;
-    try{accs=await this.getAccounts();}catch(e){throw new Error(e.status===403?'Token rejected (403) — check your token is valid and has Accounts read scope':e.status===401?'Invalid token (401) — re-generate your token at developer.starlingbank.com':'Could not reach Starling: '+e.message);}
-    if(!accs?.accounts?.length)throw new Error('No accounts found on this token.');
-    const accountUid=accs.accounts[0].accountUid;
-    // Try savings-goals endpoint first, then fall back to spaces endpoint
-    let goals=[];
-    try{const res=await this._get(`/account/${accountUid}/savings-goals`);goals=res?.savingsGoalList||[];}catch(e){}
-    if(!goals.length){
-      try{
-        const res=await this._get(`/account/${accountUid}/spaces`);
-        const savingsSpaces=(res?.savingsGoalSpaces||[]).map(s=>({savingsGoalUid:s.savingsGoalUid||s.spaceUid,name:s.name}));
-        const spendingSpaces=(res?.spendingSpaces||[]).map(s=>({savingsGoalUid:s.spaceUid,name:s.name+' (spending)'}));
-        goals=[...savingsSpaces,...spendingSpaces];
-      }catch(e){}
-    }
-    return{goals,accountUid};
-  },
-  async addToSavingsGoal(accountUid,goalUid,pence){
-    if(!this._token)return{ok:false,error:'No Starling token set.'};
-    if(!accountUid)return{ok:false,error:'No account UID — re-fetch Spaces in Settings.'};
-    if(!goalUid)return{ok:false,error:'No Space selected in Settings.'};
-    if(pence<=0)return{ok:false,error:'Amount is zero.'};
-    try{
-      const transferUid=crypto.randomUUID();
-      if(Sheets._url&&!this._sandbox){
-        const path=`/account/${accountUid}/savings-goals/${goalUid}/add-money/${transferUid}`;
-        const d=await Sheets._jsonp(Sheets._url+'?action=starlingPut&path='+encodeURIComponent(path)+'&token='+encodeURIComponent(this._token)+'&body='+encodeURIComponent(JSON.stringify({amount:{currency:'GBP',minorUnits:pence}})),15000);
-        if(d?.ok)return{ok:true};
-        const msg=d?.status===403?'Token rejected (403) — your token needs the "savings-goal-transfer:create" (write) scope. Re-create it at developer.starlingbank.com with that scope ticked.':d?.status===401?'Token invalid or expired (401) — generate a new one at developer.starlingbank.com.':d?.status===404?'Space not found (404) — re-fetch and re-pick your Spaces in Settings.':`Transfer failed (HTTP ${d?.status||'?'})${d?.error?': '+d.error:''}`;
-        return{ok:false,status:d?.status,error:msg};
-      }
-      const r=await fetch(`${this._base}/account/${accountUid}/savings-goals/${goalUid}/add-money/${transferUid}`,{method:'PUT',headers:{'Authorization':'Bearer '+this._token,'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify({amount:{currency:'GBP',minorUnits:pence}})});
-      if(r.ok)return{ok:true};
-      let detail='';try{const b=await r.json();detail=b?.errors?.[0]?.message||b?.error_description||b?.error||'';}catch{}
-      const msg=r.status===403?'Token rejected (403) — your token needs the "savings-goal-transfer:create" (write) scope. Re-create it at developer.starlingbank.com with that scope ticked.':r.status===401?'Token invalid or expired (401) — generate a new one at developer.starlingbank.com.':r.status===404?'Space not found (404) — re-fetch and re-pick your Spaces in Settings.':`Transfer failed (HTTP ${r.status})${detail?': '+detail:''}`;
-      return{ok:false,status:r.status,error:msg};
-    }catch(e){return{ok:false,error:'Network error: '+(e.message||'could not reach Starling')};}
-  },
-  async getAccountIdentifiers(accountUid){
-    return this._get(`/accounts/${accountUid}/identifiers`);
-  },
-  async makeLocalPayment(sourceAccountUid,sourceCategoryUid,recipientSortCode,recipientAccountNumber,recipientName,reference,minorUnits){
-    if(!this._token)return{ok:false,error:'No token'};
-    const externalId=(typeof crypto!=='undefined'&&crypto.randomUUID)?crypto.randomUUID():'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.random()*16|0;return(c==='x'?r:r&0x3|0x8).toString(16);});
-    const path=`/payments/local/account/${sourceAccountUid}/category/${sourceCategoryUid}`;
-    const body={externalIdentifier:externalId,paymentRecipient:{paymentRecipientName:recipientName,bankIdentifier:{bankIdentifierType:'SORT_CODE',bankIdentifier:recipientSortCode.replace(/-/g,'')},accountIdentifier:{accountIdentifierType:'SORT_CODE_ACCOUNT_NUMBER',sortCode:recipientSortCode.replace(/-/g,''),accountNumber:recipientAccountNumber}},reference,amount:{currency:'GBP',minorUnits}};
-    try{
-      if(Sheets._url&&!this._sandbox){
-        const d=await Sheets._jsonp(Sheets._url+'?action=starlingPost&path='+encodeURIComponent(path)+'&token='+encodeURIComponent(this._token)+'&body='+encodeURIComponent(JSON.stringify(body)),20000);
-        if(d?.paymentOrderUid||d?.success||d?.ok)return{ok:true};
-        const msg=d?.status===403?'Token missing pay-local:create scope (403).':d?.status===401?'Token invalid (401).':d?.status===400?`Payment rejected: ${d?.error||'bad request'}`:`Payment failed: ${d?.error||'unknown error'}`;
-        return{ok:false,status:d?.status,error:msg};
-      }
-      const r=await fetch(`${this._base}${path}`,{method:'POST',headers:{'Authorization':'Bearer '+this._token,'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify(body)});
-      if(r.ok)return{ok:true};
-      let detail='';try{const b=await r.json();detail=b?.errors?.[0]?.message||b?.error_description||b?.error||'';}catch{}
-      return{ok:false,status:r.status,error:`Payment failed (HTTP ${r.status})${detail?': '+detail:''}`};
-    }catch(e){return{ok:false,error:'Network error: '+(e.message||'could not reach Starling')};}
-  },
-  // Live money snapshot: main balance + Space balances + savings account balances
-  async fetchMoney(){
-    const accs=await this.getAccounts();
-    if(!accs?.accounts?.length)return null;
-    const primary=accs.accounts.find(a=>a.accountType==='PRIMARY')||accs.accounts[0];
-    const nonPrimary=accs.accounts.filter(a=>a!==primary);
-    const[bal,goalsRes,...savBals]=await Promise.all([
-      this._get(`/accounts/${primary.accountUid}/balance`).catch(()=>null),
-      this._get(`/account/${primary.accountUid}/savings-goals`).catch(()=>null),
-      ...nonPrimary.map(a=>this._get(`/accounts/${a.accountUid}/balance`).catch(()=>null))
-    ]);
-    let goals=goalsRes?.savingsGoalList||[];
-    if(!goals.length){
-      try{
-        const sp=await this._get(`/account/${primary.accountUid}/spaces`);
-        goals=(sp?.savingsGoalSpaces||[]).map(s=>({savingsGoalUid:s.savingsGoalUid||s.spaceUid,name:s.name,totalSaved:s.totalSaved}));
-      }catch(e){}
-    }
-    const savingsAccounts=nonPrimary.map((a,i)=>({uid:a.accountUid,name:a.name||a.accountType,balance:(savBals[i]?.effectiveBalance?.minorUnits??savBals[i]?.amount?.minorUnits??0)/100}));
-    return{
-      accountUid:primary.accountUid,
-      defaultCategory:primary.defaultCategory,
-      balance:(bal?.effectiveBalance?.minorUnits??bal?.amount?.minorUnits??0)/100,
-      hasBalance:!!bal,
-      goals:goals.map(g=>({uid:g.savingsGoalUid,name:g.name,saved:(g.totalSaved?.minorUnits||0)/100})),
-      savingsAccounts
-    };
-  }
-};
-
 // UK tax year start (6 April) for the current tax year
 const TAX_YEAR_START=(()=>{const n=new Date();const y=(n.getMonth()<3||(n.getMonth()===3&&n.getDate()<6))?n.getFullYear()-1:n.getFullYear();return `${y}-04-06`;})();
-// Reference + amount invoice matching.
-// Pass 1: payment reference contains the invoice number (e.g. "INV-2026-003") — survives rounded/partial amounts.
-// Pass 2: amount within 2p (original behaviour).
-const normRef=s=>String(s||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
-const matchInvoicesToTxns=(inTxns,unpaidInvoices)=>{
-  const used=new Set();const matches=[];const got=new Set();
-  unpaidInvoices.forEach(inv=>{
-    const num=normRef(inv.invoiceNum);
-    if(num.length<4)return;
-    const txn=inTxns.find(t=>!used.has(t.id)&&normRef(t.ref).includes(num));
-    if(txn){matches.push({inv,txn,by:'ref'});used.add(txn.id);got.add(inv.id);}
-  });
-  // Pass 2: subtotal within £1 (covers rounding/bank fee edge cases)
-  unpaidInvoices.forEach(inv=>{
-    if(got.has(inv.id))return;
-    const txn=inTxns.find(t=>!used.has(t.id)&&Math.abs(t.amount-(inv.subtotal||0))<1.00);
-    if(txn){matches.push({inv,txn,by:'amount'});used.add(txn.id);got.add(inv.id);}
-  });
-  // Pass 3: income total only (excludes reimbursements/deductions)
-  unpaidInvoices.forEach(inv=>{
-    if(got.has(inv.id))return;
-    const txn=inTxns.find(t=>!used.has(t.id)&&Math.abs(t.amount-(inv.incomeTotal||0))<1.00);
-    if(txn){matches.push({inv,txn,by:'incomeTotal'});used.add(txn.id);got.add(inv.id);}
-  });
-  return{matches,usedTxnIds:used};
-};
-
 const compressImg=file=>new Promise(resolve=>{const img=new Image(),url=URL.createObjectURL(file);img.onload=()=>{URL.revokeObjectURL(url);const max=800,s=Math.min(max/Math.max(img.width,img.height),1);const c=document.createElement('canvas');c.width=Math.round(img.width*s);c.height=Math.round(img.height*s);c.getContext('2d').drawImage(img,0,0,c.width,c.height);resolve(c.toDataURL('image/jpeg',.68));};img.onerror=()=>resolve(null);img.src=url;});
 const readAsDataUrl=file=>new Promise(resolve=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=()=>resolve(null);r.readAsDataURL(file);});
 const dlCSV=(rows,name)=>{const csv=rows.map(r=>r.map(c=>`"${String(c??'').replace(/"/g,'""')}"`).join(',')).join('\n');const a=document.createElement('a');a.href='data:text/csv;charset=utf-8,'+encodeURIComponent(csv);a.download=name;a.click();};
@@ -385,37 +210,9 @@ return(
 </div>);}
 
 // ── HOME ─────────────────────────────────────────────────────────────────────
-function HomeView({entries,receipts,invoices=[],setView,syncStatus,lastSynced,onSync,onAlign,aligning,alignResult,sheetsUrl,starlingQueue,settings={},oldDataAvailable}){
+function HomeView({entries,receipts,invoices=[],setView,syncStatus,lastSynced,onSync,onAlign,aligning,alignResult,sheetsUrl,settings={},oldDataAvailable}){
 const[showTaxGuide,setShowTaxGuide]=useState(false);
-// ── Live money snapshot (balance + Spaces) ──
-const[money,setMoney]=useState(()=>{const c=LS.get('mhq-money-cache');return(c&&Date.now()-(c.t||0)<10*60000)?c.snap:null;});
-const[moneyErr,setMoneyErr]=useState(false);
-useEffect(()=>{
-  return; // live pot/money snapshot disabled — pot transfers removed (feed + auto-paid stay)
-  const c=LS.get('mhq-money-cache');
-  if(c&&c.sandbox===!!settings.starlingSandbox&&Date.now()-(c.t||0)<10*60000){setMoney(c.snap);return;}
-  Starling.init(settings.starlingToken,settings.starlingSandbox,settings.sheetsUrl);
-  Starling.fetchMoney().then(snap=>{
-    if(snap){
-      setMoney(snap);setMoneyErr(false);LS.set('mhq-money-cache',{t:Date.now(),sandbox:!!settings.starlingSandbox,snap});
-      if(snap.defaultCategory||snap.accountUid){setSettings(s=>{const u={};if(snap.defaultCategory&&!s.starlingDefaultCategoryUid)u.starlingDefaultCategoryUid=snap.defaultCategory;if(snap.accountUid&&!s.starlingAccountUid)u.starlingAccountUid=snap.accountUid;return Object.keys(u).length?{...s,...u}:s;});}
-    }else setMoneyErr(true);
-  }).catch(()=>setMoneyErr(true));
-},[settings.starlingToken,settings.starlingSandbox]);
-const taxPctH=parseFloat(settings.taxPercent??20);
-const holPctH=parseFloat(settings.holidayPayPercent??12.07);
-const hasTaxDest=settings.starlingTaxSavingsUid||settings.starlingTaxSpaceUid;
-const hasHolDest=settings.starlingHolidaySavingsUid||settings.starlingHolidaySpaceUid;
-const potOwed=invoices.filter(i=>i.status==='paid'&&!i.potted&&i.paidDate&&(Date.now()-new Date(i.paidDate).getTime())<45*86400000)
-  .reduce((a,i)=>a+(i.subtotal||0)*(((hasTaxDest?taxPctH:0)+(hasHolDest?holPctH:0))/100),0);
-// Tax balance: prefer savings account balance, fall back to Space balance
-const taxSavAcc=settings.starlingTaxSavingsUid?money?.savingsAccounts?.find(a=>a.uid===settings.starlingTaxSavingsUid):null;
-const taxGoalSpace=money?.goals?.find(g=>g.uid===settings.starlingTaxSpaceUid);
-const taxGoal=taxSavAcc?{saved:taxSavAcc.balance,name:taxSavAcc.name}:taxGoalSpace?{saved:taxGoalSpace.saved,name:taxGoalSpace.name}:null;
-// Holiday balance: prefer savings account balance, fall back to Space balance
-const holSavAcc=settings.starlingHolidaySavingsUid?money?.savingsAccounts?.find(a=>a.uid===settings.starlingHolidaySavingsUid):null;
-const holGoalSpace=money?.goals?.find(g=>g.uid===settings.starlingHolidaySpaceUid);
-const holGoal=holSavAcc?{saved:holSavAcc.balance,name:holSavAcc.name}:holGoalSpace?{saved:holGoalSpace.saved,name:holGoalSpace.name}:null;
+const[homeMenu,setHomeMenu]=useState(false);
 const now=new Date();
 const today0=new Date();today0.setHours(0,0,0,0);
 const activeE=entries.filter(e=>e.status!=='Void');
@@ -432,18 +229,22 @@ const unpaid=activeE.filter(e=>e.status==='Pending');
 const unpaidAmt=unpaid.reduce((a,e)=>a+(e.subtotal||0),0);
 const overdueInvoices=invoices.filter(inv=>inv.status!=='paid'&&inv.dueDate&&new Date(inv.dueDate+'T12:00:00')<today0);
 const overdueAmt=overdueInvoices.reduce((a,inv)=>a+(inv.subtotal||0),0);
-const stMatchCount=(starlingQueue?.matches||[]).length;
-const stUnmatchedCount=(starlingQueue?.unmatched||[]).filter(t=>!invoices.some(iv=>Math.abs((iv.subtotal||0)-(t.amount||0))<0.02&&datesClose(iv.date,t.date))).length;
 const homePotsConfigured=false; // pot transfers removed — no "tax not potted" prompts
 const needPotCount=homePotsConfigured?invoices.filter(i=>i.status==='paid'&&!i.potted&&i.paidDate&&(Date.now()-new Date(i.paidDate).getTime())<45*86400000).length:0;
-const totalActions=stMatchCount+stUnmatchedCount+overdueInvoices.length+needPotCount;
+const totalActions=overdueInvoices.length+needPotCount;
 return(<Page>
 <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',marginBottom:20}}>
   <div>
     <div style={{fontSize:10,fontWeight:700,color:T.accent,letterSpacing:2.5,textTransform:'uppercase',marginBottom:2}}>Money</div>
     <div style={{fontFamily:'Space Mono,monospace',fontSize:24,fontWeight:700,letterSpacing:-.5}}>Honey</div>
   </div>
-  <div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:4}}>
+  <div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:4,position:'relative',marginTop:30}}>
+    <div style={{position:'relative'}}>
+      <button onClick={()=>setHomeMenu(o=>!o)} style={{background:'none',border:`1px solid ${T.border}`,borderRadius:8,padding:'4px 10px',fontSize:10,color:T.textMuted,fontWeight:700,display:'flex',alignItems:'center',gap:4,cursor:'pointer'}}><I n="chart" sz={11} c={T.textMuted}/> Reports ▾</button>
+      {homeMenu&&(<div style={{position:'absolute',top:'110%',right:0,background:T.surface,border:`1px solid ${T.border}`,borderRadius:10,boxShadow:'0 6px 20px rgba(0,0,0,.12)',zIndex:140,overflow:'hidden',minWidth:150}}>
+        <button onClick={()=>{setHomeMenu(false);setView('reports');}} style={{display:'flex',alignItems:'center',gap:8,width:'100%',background:'none',border:'none',padding:'10px 14px',fontSize:13,fontWeight:700,color:T.text,cursor:'pointer'}}><I n="chart" sz={15} c={T.accent}/> Reports</button>
+      </div>)}
+    </div>
     <SyncPill status={syncStatus}/>
     {sheetsUrl&&(
       <button onClick={onSync} style={{background:'none',border:`1px solid ${T.border}`,borderRadius:8,padding:'4px 10px',fontSize:10,color:T.textMuted,fontWeight:700,display:'flex',alignItems:'center',gap:4}}>
@@ -454,70 +255,11 @@ return(<Page>
     {!sheetsUrl&&<div style={{fontSize:9,color:T.danger,fontWeight:700}}>No Sheets connected</div>}
   </div>
 </div>
-{/* ── One-tap reconciliation ── */}
-<button onClick={onAlign} disabled={aligning} style={{width:'100%',marginBottom:alignResult?8:10,border:`1px solid ${T.accent}55`,borderRadius:16,padding:'15px 18px',cursor:aligning?'default':'pointer',background:'linear-gradient(135deg,#f6efe0 0%,#f0eee4 60%,#f2f1ea 100%)',display:'flex',alignItems:'center',gap:14,textAlign:'left',opacity:aligning?.85:1,transition:'opacity .2s'}}>
-  <div style={{width:42,height:42,borderRadius:12,flexShrink:0,display:'flex',alignItems:'center',justifyContent:'center',background:T.accent+'1a',border:`1px solid ${T.accent}33`}}>
-    {aligning?<div style={{width:18,height:18,border:`2px solid ${T.accent}44`,borderTopColor:T.accentBright,borderRadius:'50%',animation:'spin .8s linear infinite'}}/>:<I n="sync" sz={20} c={T.accentBright}/>}
-  </div>
-  <div style={{flex:1,minWidth:0}}>
-    <div style={{fontSize:16,fontWeight:700,color:T.text,letterSpacing:-.2}}>{aligning?'Aligning…':'Align everything'}</div>
-    <div style={{fontSize:11.5,color:T.textMuted,lineHeight:1.45,marginTop:2}}>{aligning?'Reading your receipt & invoice folders…':'Scan your folders — AI reads new receipts & invoices into Honey'}</div>
-  </div>
-</button>
-{alignResult&&(
-  <Card style={{marginBottom:10,background:alignResult.err?'#f6efe0':'#e7f3ee',border:`1px solid ${alignResult.err?T.danger+'44':T.lumpGreen+'33'}`}}>
-    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:alignResult.err?0:10}}>
-      <div style={{fontSize:10,fontWeight:700,color:alignResult.err?T.pending:T.lumpGreen,letterSpacing:1.5,textTransform:'uppercase'}}>{alignResult.err?'⚠ Aligned with a snag':'✓ Aligned'}{alignResult.at?` · ${alignResult.at.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}`:''}</div>
-    </div>
-    {alignResult.err&&<div style={{fontSize:12,color:T.textMuted,lineHeight:1.5,marginTop:6}}>{alignResult.err}</div>}
-    {!alignResult.err&&(<>
-      <div style={{display:'flex',flexWrap:'wrap',gap:6,marginBottom:(alignResult.matched+alignResult.uninvoiced+alignResult.untagged)>0?10:0}}>
-        {alignResult.restored&&<span style={{fontSize:11,color:T.textMuted,background:'#e7f3ee',border:`1px solid ${T.lumpGreen}22`,borderRadius:7,padding:'3px 9px'}}>Restored from Sheet</span>}
-        {alignResult.balance&&<span style={{fontSize:11,color:T.textMuted,background:'#e7f3ee',border:`1px solid ${T.lumpGreen}22`,borderRadius:7,padding:'3px 9px'}}>Balances refreshed</span>}
-        <span style={{fontSize:11,color:T.textMuted,background:'#e7f3ee',border:`1px solid ${T.lumpGreen}22`,borderRadius:7,padding:'3px 9px'}}>90 days re-read</span>
-      </div>
-      {alignResult.matched>0&&(<div style={{display:'flex',alignItems:'center',gap:10,marginBottom:8}}>
-        <I n="paid" sz={16} c={T.lumpGreen}/>
-        <div style={{flex:1,fontSize:13}}><strong style={{color:T.lumpGreen}}>{alignResult.matched}</strong><span style={{color:T.textMuted}}> payment{alignResult.matched!==1?'s':''} matched to invoice{alignResult.matched!==1?'s':''}</span></div>
-        <button onClick={()=>setView('invoice')} style={{fontSize:11,fontWeight:700,color:T.accent,background:'none',border:`1px solid ${T.accent}44`,borderRadius:6,padding:'3px 9px',cursor:'pointer'}}>Confirm</button>
-      </div>)}
-      {alignResult.uninvoiced>0&&(<div style={{display:'flex',alignItems:'center',gap:10,marginBottom:8}}>
-        <I n="warn" sz={16} c={T.pending}/>
-        <div style={{flex:1,fontSize:13}}><strong style={{color:T.pending}}>{alignResult.uninvoiced}</strong><span style={{color:T.textMuted}}> incoming payment{alignResult.uninvoiced!==1?'s':''} without an invoice</span></div>
-        <button onClick={()=>setView('invoice')} style={{fontSize:11,fontWeight:700,color:T.accent,background:'none',border:`1px solid ${T.accent}44`,borderRadius:6,padding:'3px 9px',cursor:'pointer'}}>Review</button>
-      </div>)}
-      {alignResult.untagged>0&&(<div style={{display:'flex',alignItems:'center',gap:10}}>
-        <I n="receipt" sz={16} c={T.business}/>
-        <div style={{flex:1,fontSize:13}}><strong style={{color:T.business}}>{alignResult.untagged}</strong><span style={{color:T.textMuted}}> card payment{alignResult.untagged!==1?'s':''} to tag</span></div>
-        <button onClick={()=>setView('feed')} style={{fontSize:11,fontWeight:700,color:T.accent,background:'none',border:`1px solid ${T.accent}44`,borderRadius:6,padding:'3px 9px',cursor:'pointer'}}>Tag</button>
-      </div>)}
-      {(alignResult.matched+alignResult.uninvoiced+alignResult.untagged)===0&&<div style={{fontSize:12.5,color:T.textMuted,lineHeight:1.5}}>Everything's already lined up — no payments waiting on you.</div>}
-    </>)}
-  </Card>
-)}
 {oldDataAvailable&&entries.length===0&&invoices.length===0&&receipts.length===0&&(
   <Card style={{marginBottom:10,background:T.accent+'0d',border:`1.5px solid ${T.accent}55`}}>
     <div style={{fontWeight:700,fontSize:14,marginBottom:4}}>📦 Moving from Freelance Tracker?</div>
     <div style={{fontSize:12,color:T.textMuted,lineHeight:1.6,marginBottom:10}}>Your old app's data was found in this browser. Bring this tax year's invoices, income, receipts and settings across — the old app is never touched.</div>
     <Btn full small onClick={()=>setView('settings')}>Transfer my data →</Btn>
-  </Card>
-)}
-{settings.starlingToken&&(
-  <Card style={{marginBottom:10,background:'linear-gradient(135deg,#e7f3ee 0%,#f2f1ea 100%)',border:`1px solid ${T.lumpGreen}33`}}>
-    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
-      <div style={{fontSize:10,fontWeight:700,color:T.lumpGreen,letterSpacing:1.5,textTransform:'uppercase'}}>🏦 Starling · live{settings.starlingSandbox?' (sandbox)':''}</div>
-      {money&&potOwed>0.009&&<button onClick={()=>setView('invoice')} style={{background:T.danger+'18',border:`1px solid ${T.danger}55`,borderRadius:8,padding:'3px 9px',fontSize:10,fontWeight:700,color:T.danger,cursor:'pointer'}}>{fmt(potOwed)} to pot →</button>}
-      {money&&potOwed<=0.009&&<span style={{fontSize:10,fontWeight:700,color:T.lumpGreen}}>✓ pots up to date</span>}
-    </div>
-    {!money&&!moneyErr&&<div style={{fontSize:12,color:T.textMuted,display:'flex',alignItems:'center',gap:8}}><div style={{width:12,height:12,border:`2px solid ${T.border}`,borderTopColor:T.lumpGreen,borderRadius:'50%',animation:'spin .8s linear infinite'}}/>Fetching balances…</div>}
-    {moneyErr&&!money&&<div style={{fontSize:11,color:T.textMuted}}>Couldn't fetch balances — feed sync still works. Check token scopes (account:read, balance:read).</div>}
-    {money&&(
-      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8}}>
-        <div><div style={{fontSize:9,fontWeight:700,color:T.textMuted,textTransform:'uppercase',letterSpacing:1.2,marginBottom:4}}>Balance</div><div style={{fontFamily:'Space Mono,monospace',fontSize:17,fontWeight:700}}>{money.hasBalance?fmt(money.balance):'—'}</div></div>
-        <div><div style={{fontSize:9,fontWeight:700,color:T.textMuted,textTransform:'uppercase',letterSpacing:1.2,marginBottom:4}}>{settings.starlingTaxSavingsName||settings.starlingTaxSpaceName||'Tax pot'}</div><div style={{fontFamily:'Space Mono,monospace',fontSize:17,fontWeight:700,color:T.lumpGreen}}>{taxGoal?fmt(taxGoal.saved):'—'}</div></div>
-        <div><div style={{fontSize:9,fontWeight:700,color:T.textMuted,textTransform:'uppercase',letterSpacing:1.2,marginBottom:4}}>{settings.starlingHolidaySavingsName||settings.starlingHolidaySpaceName||'Holiday pot'}</div><div style={{fontFamily:'Space Mono,monospace',fontSize:17,fontWeight:700,color:T.timed}}>{holGoal?fmt(holGoal.saved):'—'}</div></div>
-      </div>
-    )}
   </Card>
 )}
 <Card style={{marginBottom:10,background:'linear-gradient(135deg,#f6efe0 0%,#f2f1ea 100%)',border:`1px solid ${T.border}`}}>
@@ -558,16 +300,6 @@ return(<Page>
       <I n="money" sz={16} c={T.danger}/>
       <div style={{flex:1,fontSize:13}}><strong style={{color:T.danger}}>{needPotCount} paid invoice{needPotCount!==1?'s':''}</strong><span style={{color:T.textMuted}}> with tax not yet potted</span></div>
       <button onClick={()=>setView('invoice')} style={{fontSize:11,fontWeight:700,color:T.accent,background:'none',border:`1px solid ${T.accent}44`,borderRadius:6,padding:'3px 9px',cursor:'pointer'}}>Pot now</button>
-    </div>)}
-    {stMatchCount>0&&(<div style={{display:'flex',alignItems:'center',gap:10,marginBottom:8}}>
-      <I n="paid" sz={16} c={T.lumpGreen}/>
-      <div style={{flex:1,fontSize:13}}><strong style={{color:T.lumpGreen}}>{stMatchCount} payment{stMatchCount!==1?'s':''}</strong><span style={{color:T.textMuted}}> matched to invoice{stMatchCount!==1?'s':''}</span></div>
-      <button onClick={()=>setView('invoice')} style={{fontSize:11,fontWeight:700,color:T.accent,background:'none',border:`1px solid ${T.accent}44`,borderRadius:6,padding:'3px 9px',cursor:'pointer'}}>Confirm</button>
-    </div>)}
-    {stUnmatchedCount>0&&(<div style={{display:'flex',alignItems:'center',gap:10,marginBottom:8}}>
-      <I n="warn" sz={16} c={T.pending}/>
-      <div style={{flex:1,fontSize:13}}><strong style={{color:T.pending}}>{stUnmatchedCount} uninvoiced</strong><span style={{color:T.textMuted}}> payment{stUnmatchedCount!==1?'s':''} to confirm</span></div>
-      <button onClick={()=>setView('invoice')} style={{fontSize:11,fontWeight:700,color:T.accent,background:'none',border:`1px solid ${T.accent}44`,borderRadius:6,padding:'3px 9px',cursor:'pointer'}}>Review</button>
     </div>)}
     {overdueInvoices.length>0&&(<div style={{display:'flex',alignItems:'center',gap:10}}>
       <I n="warn" sz={16} c={T.danger}/>
@@ -632,10 +364,6 @@ const[gmailErr,setGmailErr]=useState(null);
 const[gmailSel,setGmailSel]=useState({});
 const[gmailEdits,setGmailEdits]=useState({});
 const ge=(id,k,v)=>setGmailEdits(p=>({...p,[id]:{...(p[id]||{}),[k]:v}}));
-// Starling receipt-linking state
-const[stPicking,setStPicking]=useState(false);const[stTxns,setStTxns]=useState([]);const[stLoading,setStLoading]=useState(false);
-// Post-save Starling match suggestion
-const[postSave,setPostSave]=useState(null); // {receiptId, txn}
 const fileRef=useRef(),camRef=useRef();
 const sf=(k,v)=>setForm(f=>({...f,[k]:v}));
 
@@ -696,8 +424,6 @@ const handleScanFree=async()=>{
 
 const handleScanAI=async()=>{
   if(!img?.dataUrl||scanning)return;
-  const apiKey=settings?.anthropicKey||'';
-  if(!apiKey){setScanErr('Add your Anthropic API key in Settings → AI Scan Key to use this.');return;}
   setScanning('ai');setScanErr(null);
   try{
     const base64=img.dataUrl.split(',')[1];
@@ -708,9 +434,9 @@ const handleScanAI=async()=>{
     const content=isPdf
       ?[{type:"document",source:{type:"base64",media_type:"application/pdf",data:base64}},{type:"text",text:prompt}]
       :[{type:"image",source:{type:"base64",media_type:mediaType,data:base64}},{type:"text",text:prompt}];
-    const res=await fetch("https://api.anthropic.com/v1/messages",{
+    const res=await fetch(PROXY_URL,{
       method:"POST",
-      headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+      headers:{"Content-Type":"application/json"},
       body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:500,messages:[{role:"user",content}]})
     });
     const data=await res.json();
@@ -745,11 +471,11 @@ const handleGmailScan=async()=>{
     edits[r.id]={description:r.vendor||r.subject||'Receipt',amount:r.amount!=null?String(r.amount):'',date:r.date||today(),category:'business',subcategory:'other'};
   });
   setGmailSel(sel);setGmailEdits(edits);
-  // AI category prediction if API key set
-  if(settings.anthropicKey&&found.length>0){
+  // AI category prediction via proxy
+  if(found.length>0){
     found.forEach(async r=>{
       try{
-        const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json','x-api-key':settings.anthropicKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:'claude-haiku-4-5-20251001',max_tokens:20,messages:[{role:'user',content:`Business expense category. Reply ONLY one of: meals|travel|accommodation|equipment|software|training|marketing|office|professional|other
+        const res=await fetch(PROXY_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-haiku-4-5-20251001',max_tokens:20,messages:[{role:'user',content:`Business expense category. Reply ONLY one of: meals|travel|accommodation|equipment|software|training|marketing|office|professional|other
 
 Expense: ${r.vendor||''} ${r.subject||''}`}]})});
         const d=await res.json();
@@ -828,16 +554,7 @@ const handleSave=async()=>{
     if(driveUrl)onUpdate(savedId,{driveUrl,imageData:null});
     setUploading(false);
   }
-  // Auto-suggest matching Starling OUT transaction
-  if(settings.starlingToken&&savedAmt>0){
-    Starling.init(settings.starlingToken,settings.starlingSandbox,settings.sheetsUrl);
-    const txns=await Starling.fetchRecent(30).catch(()=>null);
-    if(txns){
-      const outTxns=txns.filter(t=>t.direction==='OUT');
-      const best=outTxns.sort((a,b)=>Math.abs(a.amount-savedAmt)-Math.abs(b.amount-savedAmt))[0];
-      if(best&&Math.abs(best.amount-savedAmt)<(savedAmt*0.05+0.5))setPostSave({receiptId:savedId,txn:best});
-    }
-  }
+
 };
 const handleDriveUpload=async r=>{if(!r.imageData||!sheetsUrl)return;setUploading(true);Sheets.init(sheetsUrl);const url=await Sheets.uploadReceipt({...r});if(url)onUpdate(r.id,{driveUrl:url,imageData:null});setUploading(false);};
 const pending=receipts.filter(r=>r.category==='reimbursable'&&r.status==='pending');
@@ -919,40 +636,6 @@ Expense: ${r.description||r.notes||'Receipt'}`}]})});
         <Btn full outline color={T.danger} onClick={handleConfirmDelete}>Delete</Btn>
       </div>
     </div>
-    {settings?.starlingToken&&(<div style={{marginTop:14}}>
-      <div style={{fontSize:11,fontWeight:700,color:T.textMuted,letterSpacing:1,textTransform:'uppercase',marginBottom:8}}>Starling Bank</div>
-      {r.starlingTxnId?(
-        <div style={{background:T.lumpGreen+'14',border:`1px solid ${T.lumpGreen}44`,borderRadius:12,padding:'10px 12px'}}>
-          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10}}>
-            <div><div style={{fontSize:13,fontWeight:700,color:T.lumpGreen}}>✓ Linked to Starling</div><div style={{fontSize:11,color:T.textMuted,marginTop:2}}>{r.starlingRef||r.starlingTxnId} · {r.starlingDate||''}</div></div>
-            <button onClick={()=>onUpdate(r.id,{starlingTxnId:null,starlingRef:null,starlingDate:null})} style={{fontSize:11,color:T.textMuted,background:'none',border:`1px solid ${T.border}`,borderRadius:6,padding:'3px 8px',cursor:'pointer'}}>Unlink</button>
-          </div>
-        </div>
-      ):(
-        <>
-          {!stPicking&&(<button onClick={async()=>{setStPicking(true);setStLoading(true);Starling.init(settings.starlingToken,settings.starlingSandbox);const txns=await Starling.fetchRecent(60).catch(()=>null);setStLoading(false);if(!txns){setStTxns([]);return;}const sorted=[...txns].sort((a,b)=>Math.abs(a.amount-(r.amount||0))-Math.abs(b.amount-(r.amount||0)));setStTxns(sorted.slice(0,15));}} style={{width:'100%',background:T.surface,border:`1.5px solid ${T.border}`,borderRadius:12,padding:'10px 14px',color:T.textMuted,fontWeight:700,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',gap:8,cursor:'pointer'}}>
-            🏦 Link to Starling transaction
-          </button>)}
-          {stPicking&&(<div style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:12,padding:'12px'}}>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
-              <div style={{fontSize:13,fontWeight:700}}>Pick transaction</div>
-              <button onClick={()=>{setStPicking(false);setStTxns([]);}} style={{fontSize:11,color:T.textMuted,background:'none',border:'none',cursor:'pointer'}}>Cancel</button>
-            </div>
-            {stLoading&&<div style={{textAlign:'center',padding:'14px',color:T.textMuted,fontSize:13}}><Spinner/> Fetching…</div>}
-            {!stLoading&&stTxns.length===0&&<div style={{fontSize:12,color:T.textMuted,textAlign:'center',padding:'10px'}}>No transactions found</div>}
-            {!stLoading&&stTxns.map(t=>(
-              <button key={t.id} onClick={()=>{onUpdate(r.id,{starlingTxnId:t.id,starlingRef:t.ref||t.counterParty,starlingDate:t.date});setStPicking(false);setStTxns([]);}} style={{width:'100%',textAlign:'left',background:'none',border:`1px solid ${T.border}`,borderRadius:10,padding:'9px 11px',marginBottom:6,color:T.text,cursor:'pointer',display:'flex',justifyContent:'space-between',alignItems:'center',gap:10}}>
-                <div style={{minWidth:0}}>
-                  <div style={{fontSize:13,fontWeight:700,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{t.counterParty||t.ref||'Transaction'}</div>
-                  <div style={{fontSize:11,color:T.textMuted}}>{t.date} · {t.direction}</div>
-                </div>
-                <div style={{fontFamily:'Space Mono,monospace',fontSize:13,fontWeight:700,flexShrink:0,color:Math.abs(t.amount-(r.amount||0))<0.02?T.lumpGreen:T.text}}>{fmt(t.amount)}</div>
-              </button>
-            ))}
-          </div>)}
-        </>
-      )}
-    </div>)}
   </Page>);
 }
 
@@ -1070,14 +753,6 @@ const ReceiptItem=({r})=>(<div onClick={()=>{setViewing(r.id);setMode('view');}}
 </div>);
 return(<Page>
 <div style={{fontFamily:'Space Mono,monospace',fontSize:18,fontWeight:700,marginBottom:4}}>Receipts</div>
-{postSave&&(<Card style={{marginBottom:12,background:T.timed+'10',border:`1.5px solid ${T.timed}55`}}>
-  <div style={{fontSize:12,fontWeight:700,color:T.timed,marginBottom:4}}>🏦 Link to Starling payment?</div>
-  <div style={{fontSize:12,color:T.textMuted,marginBottom:10}}>{postSave.txn.counterParty||postSave.txn.ref||'Transaction'} · {fmt(postSave.txn.amount)} · {postSave.txn.date}</div>
-  <div style={{display:'flex',gap:8}}>
-    <Btn small color={T.timed} onClick={()=>{onUpdate(postSave.receiptId,{starlingTxnId:postSave.txn.id,starlingRef:postSave.txn.ref||postSave.txn.counterParty,starlingDate:postSave.txn.date});setPostSave(null);}}>Link</Btn>
-    <Btn small outline color={T.textMuted} onClick={()=>setPostSave(null)}>Skip</Btn>
-  </div>
-</Card>)}
 <Btn full onClick={()=>setMode('add')} style={{marginBottom:sheetsUrl?8:16}}><I n="plus" sz={16} c="#08060c"/> Add Receipt</Btn>
 {sheetsUrl&&<button onClick={handleGmailScan} style={{width:'100%',background:T.timed+'12',border:`1.5px solid ${T.timed}40`,borderRadius:14,padding:'11px 14px',color:T.timed,fontWeight:700,fontSize:14,display:'flex',alignItems:'center',justifyContent:'center',gap:8,marginBottom:16}}><I n="mail" sz={16} c={T.timed}/> Import from Gmail (Tracker/Receipts)</button>}
 <Lbl>Reimbursable Expenses</Lbl>
@@ -1089,341 +764,12 @@ return(<Page>
 {bizReceipts.length===0?<div style={{background:T.surface,borderRadius:14,padding:'14px',marginBottom:16,fontSize:13,color:T.textMuted,textAlign:'center'}}>None yet</div>:bizReceipts.map(r=><ReceiptItem key={r.id} r={r}/>)}
 </Page>);}
 
-// ── BANK FEED ────────────────────────────────────────────────────────────────
-function FeedView({receipts,invoices,entries,settings,onAddReceipt,onUpdateReceipt,sheetsUrl,setView,onIncomeTxn,onDeleteEntry}){
-const[txns,setTxns]=useState(null);
-const[loading,setLoading]=useState(false);
-const[err,setErr]=useState(null);
-const[filter,setFilter]=useState('todo');
-const[tagging,setTagging]=useState(null);
-const[tagForm,setTagForm]=useState({description:'',subcategory:'other'});
-const[tagImg,setTagImg]=useState(null);
-const tagFileRef=useRef();
-const handleTagFile=async f=>{
-  if(!f)return;
-  let d=f.type==='application/pdf'?await readAsDataUrl(f):(await compressImg(f))||(await readAsDataUrl(f));
-  if(d)setTagImg({dataUrl:d,name:f.name||'receipt.jpg'});
-};
-const[personal,setPersonal]=useState(()=>LS.get('mhq-feed-personal')||[]);
-useEffect(()=>{LS.set('mhq-feed-personal',personal);},[personal]);
-const[notIncome,setNotIncome]=useState(()=>LS.get('mhq-feed-not-income')||[]);
-useEffect(()=>{LS.set('mhq-feed-not-income',notIncome);},[notIncome]);
-const load=async(force)=>{
-  if(!settings.starlingToken){setErr('noToken');return;}
-  const cache=LS.get('mhq-starling-cache');
-  if(!force&&cache&&cache.sandbox===!!settings.starlingSandbox&&Date.now()-(cache.t||0)<10*60000){setTxns(cache.txns||[]);return;}
-  setLoading(true);setErr(null);
-  Starling.init(settings.starlingToken,settings.starlingSandbox,settings.sheetsUrl);
-  try{
-    const t=await Starling.fetchRecent(90);
-    if(!t){setErr('No accounts found on this token.');setLoading(false);return;}
-    LS.set('mhq-starling-cache',{t:Date.now(),sandbox:!!settings.starlingSandbox,txns:t});
-    setTxns(t);
-  }catch(e){setErr(e.status===403?'Token rejected (403) — check scopes at developer.starlingbank.com.':e.status===401?'Token invalid or expired (401) — generate a new one.':'Could not reach Starling: '+(e.message||'network error'));}
-  setLoading(false);
-};
-useEffect(()=>{load(false);},[]);
-const receiptByTxn={};receipts.forEach(r=>{if(r.starlingTxnId)receiptByTxn[r.starlingTxnId]=r;});
-const invoiceByTxn={};invoices.forEach(i=>{if(i.starlingTxnId)invoiceByTxn[i.starlingTxnId]=i;});
-const entryByTxn={};entries.forEach(e=>{if(e.starlingTxnId)entryByTxn[e.starlingTxnId]=e;});
-const statusOf=t=>{
-  if(t.direction==='OUT'){
-    if(receiptByTxn[t.id])return'expensed';
-    if(personal.includes(t.id))return'personal';
-    return'todo';
-  }
-  if(notIncome.includes(t.id))return'notIncome';
-  if(invoiceByTxn[t.id])return'invoiced';
-  if(entryByTxn[t.id])return'income';
-  return'todo';
-};
-const all=(txns||[]).slice().sort((a,b)=>(b.date||'').localeCompare(a.date||''));
-const todoCount=all.filter(t=>statusOf(t)==='todo').length;
-const shown=all.filter(t=>{
-  const s=statusOf(t);
-  if(filter==='todo')return s==='todo';
-  if(filter==='in')return t.direction==='IN';
-  if(filter==='out')return t.direction==='OUT';
-  return true;
-});
-const startTag=t=>{
-  const g=guessCat(t);
-  setTagging(t.id);setTagImg(null);
-  setTagForm({description:t.counterParty||t.ref||'Expense',subcategory:g?g.cat:'other'});
-};
-const saveTag=async t=>{
-  const newR={date:t.date||today(),description:tagForm.description||t.counterParty||'Expense',amount:t.amount,category:'business',subcategory:tagForm.subcategory||'other',paidBy:'',owedBy:'',notes:'Tagged from bank feed'+(t.ref?' · ref: '+t.ref:''),imageData:tagImg?.dataUrl||null,imageName:tagImg?.name||null,status:'logged',starlingTxnId:t.id,starlingRef:t.ref||t.counterParty,starlingDate:t.date};
-  const id=onAddReceipt(newR);
-  setTagging(null);setTagImg(null);
-  // Photo attached? Upload to Drive in the background
-  if(sheetsUrl&&newR.imageData&&id){
-    Sheets.init(sheetsUrl);
-    const driveUrl=await Sheets.uploadReceipt({...newR,id}).catch(()=>null);
-    if(driveUrl&&onUpdateReceipt)onUpdateReceipt(id,{driveUrl,imageData:null});
-  }
-};
-const Pill=({c,children})=><span style={{background:c+'18',color:c,border:`1px solid ${c}44`,borderRadius:6,padding:'2px 8px',fontSize:10,fontWeight:700}}>{children}</span>;
-return(<Page>
-<div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}>
-  <div style={{fontFamily:'Space Mono,monospace',fontSize:18,fontWeight:700}}>Bank Feed</div>
-  <button onClick={()=>load(true)} disabled={loading} style={{background:'none',border:`1px solid ${T.border}`,borderRadius:8,padding:'5px 11px',fontSize:11,color:T.textMuted,fontWeight:700,display:'flex',alignItems:'center',gap:5,opacity:loading?0.5:1}}><I n="sync" sz={12} c={T.textMuted}/> Refresh</button>
-</div>
-<div style={{fontSize:13,color:T.textMuted,marginBottom:14}}>Last 90 days · tag outgoings as business expenses, no typing needed{todoCount>0?<strong style={{color:T.pending}}> · {todoCount} to review</strong>:null}</div>
-{err==='noToken'&&(<Card style={{textAlign:'center',padding:'30px 20px'}}>
-  <div style={{fontSize:32,marginBottom:10}}>🏦</div>
-  <div style={{fontWeight:700,marginBottom:6}}>Connect Starling first</div>
-  <div style={{fontSize:13,color:T.textMuted,marginBottom:14}}>Add your Starling token in Settings and your bank feed appears here.</div>
-  <Btn small onClick={()=>setView('settings')}>Open Settings</Btn>
-</Card>)}
-{err&&err!=='noToken'&&<div style={{fontSize:12,color:T.danger,background:T.dangerBg,borderRadius:10,padding:'10px 12px',marginBottom:10}}>{err}</div>}
-{!err&&(<>
-<div style={{display:'flex',gap:8,marginBottom:14}}>
-  {[['todo','To review'],['in','In'],['out','Out'],['all','All']].map(([v,l])=>(
-    <button key={v} onClick={()=>setFilter(v)} style={{background:filter===v?T.accent+'22':T.surface,border:`1.5px solid ${filter===v?T.accent:T.border}`,borderRadius:10,padding:'6px 13px',fontSize:12,fontWeight:700,color:filter===v?T.accent:T.textMuted}}>{l}</button>
-  ))}
-</div>
-{loading&&<div style={{textAlign:'center',padding:'30px',color:T.textMuted,fontSize:13}}>Fetching transactions…</div>}
-{!loading&&txns&&shown.length===0&&<div style={{textAlign:'center',padding:'40px 20px',color:T.textMuted}}><div style={{fontSize:32,marginBottom:8}}>✨</div><div style={{fontWeight:700}}>{filter==='todo'?'All caught up':'Nothing here'}</div></div>}
-{!loading&&shown.map(t=>{
-  const s=statusOf(t);
-  const isIn=t.direction==='IN';
-  const isTagging=tagging===t.id;
-  return(<div key={t.id} style={{background:T.surface,borderRadius:14,padding:'11px 13px',marginBottom:8,borderLeft:`3px solid ${isIn&&s!=='notIncome'?T.lumpGreen:s==='expensed'?T.business:T.border}`,opacity:s==='personal'||s==='notIncome'?0.5:1}}>
-    <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:10}}>
-      <div style={{flex:1,minWidth:0}}>
-        <div style={{fontWeight:700,fontSize:13,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{t.counterParty||t.ref||'Transaction'}</div>
-        <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap',marginTop:3}}>
-          <span style={{fontSize:11,color:T.textMuted}}>{fmtD(t.date)}</span>
-          {t.ref&&t.counterParty&&<span style={{fontSize:10,color:T.textFaint,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',maxWidth:130}}>{t.ref}</span>}
-          {s==='expensed'&&<Pill c={T.business}>✓ {catLabel(receiptByTxn[t.id].subcategory)}</Pill>}
-          {s==='personal'&&<Pill c={T.textMuted}>Personal</Pill>}
-          {s==='invoiced'&&<Pill c={T.lumpGreen}>✓ {invoiceByTxn[t.id].invoiceNum}</Pill>}
-          {s==='income'&&<Pill c={T.lumpGreen}>✓ Income logged</Pill>}
-          {s==='notIncome'&&<Pill c={T.textFaint}>Not income</Pill>}
-          {s==='todo'&&!isIn&&(()=>{const g=guessCat(t);return g?<Pill c={T.manual}>{g.label}?</Pill>:null;})()}
-        </div>
-      </div>
-      <div style={{fontFamily:'Space Mono,monospace',fontSize:14,fontWeight:700,flexShrink:0,color:isIn?T.lumpGreen:T.text}}>{isIn?'+':'−'}{fmt(t.amount)}</div>
-    </div>
-    {s==='todo'&&!isTagging&&(
-      <div style={{display:'flex',gap:7,marginTop:9}}>
-        {isIn?(
-          <>
-            <button onClick={()=>onIncomeTxn&&onIncomeTxn(t,'invoice')} style={{flex:1,background:T.lumpGreen+'14',border:`1.5px solid ${T.lumpGreen}44`,borderRadius:9,padding:'6px 10px',color:T.lumpGreen,fontWeight:700,fontSize:12,cursor:'pointer'}}>Make invoice</button>
-            <button onClick={()=>onIncomeTxn&&onIncomeTxn(t,'log')} style={{background:'none',border:`1px solid ${T.border}`,borderRadius:9,padding:'6px 12px',color:T.textMuted,fontWeight:700,fontSize:12,cursor:'pointer'}}>Log only</button>
-            <button onClick={()=>setNotIncome(p=>[...p,t.id])} style={{background:'none',border:`1px solid ${T.border}`,borderRadius:9,padding:'6px 12px',color:T.textFaint,fontWeight:700,fontSize:12,cursor:'pointer'}}>Skip</button>
-          </>
-        ):(<>
-          <button onClick={()=>startTag(t)} style={{flex:1,background:T.business+'14',border:`1.5px solid ${T.business}44`,borderRadius:9,padding:'6px 10px',color:T.business,fontWeight:700,fontSize:12,cursor:'pointer'}}>Business expense</button>
-          <button onClick={()=>setPersonal(p=>[...p,t.id])} style={{background:'none',border:`1px solid ${T.border}`,borderRadius:9,padding:'6px 12px',color:T.textMuted,fontWeight:700,fontSize:12,cursor:'pointer'}}>Personal</button>
-        </>)}
-      </div>
-    )}
-    {s==='personal'&&(
-      <button onClick={()=>setPersonal(p=>p.filter(id=>id!==t.id))} style={{marginTop:7,background:'none',border:'none',color:T.textFaint,fontSize:11,fontWeight:700,padding:0,cursor:'pointer'}}>Undo</button>
-    )}
-    {s==='income'&&(
-      <button onClick={()=>{const e=entryByTxn[t.id];if(e&&onDeleteEntry)onDeleteEntry(e.id);setNotIncome(p=>[...p,t.id]);}} style={{marginTop:7,background:'none',border:'none',color:T.textFaint,fontSize:11,fontWeight:700,padding:0,cursor:'pointer'}}>Remove income · not income</button>
-    )}
-    {s==='notIncome'&&(
-      <button onClick={()=>setNotIncome(p=>p.filter(id=>id!==t.id))} style={{marginTop:7,background:'none',border:'none',color:T.textFaint,fontSize:11,fontWeight:700,padding:0,cursor:'pointer'}}>Undo</button>
-    )}
-    {isTagging&&(
-      <div style={{marginTop:10,background:'#f2f1ea',borderRadius:10,padding:'10px 11px',border:`1px solid ${T.business}33`}}>
-        {(()=>{const g=guessCat(t);return g?<div style={{fontSize:11,color:T.manual,fontWeight:700,marginBottom:8}}>✦ Recognised as {g.label} — category pre-filled</div>:null;})()}
-        <Field label="Description"><Inp value={tagForm.description} onChange={e=>setTagForm(f=>({...f,description:e.target.value}))}/></Field>
-        <Field label="Category"><Sel value={tagForm.subcategory} onChange={e=>setTagForm(f=>({...f,subcategory:e.target.value}))}>{EXPENSE_CATS.map(([v,l])=><option key={v} value={v}>{l}</option>)}</Sel></Field>
-        <input ref={tagFileRef} type="file" accept="image/*,application/pdf" capture="environment" style={{display:'none'}} onChange={e=>handleTagFile(e.target.files[0])}/>
-        {tagImg
-          ?<div style={{display:'flex',alignItems:'center',gap:10,marginBottom:12}}>
-            {tagImg.dataUrl.startsWith('data:image')?<img src={tagImg.dataUrl} alt="" style={{width:46,height:46,objectFit:'cover',borderRadius:8,background:T.surface}}/>:<I n="receipt" sz={30} c={T.accent}/>}
-            <div style={{flex:1,fontSize:11,color:T.lumpGreen,fontWeight:700}}>✓ Receipt attached</div>
-            <button onClick={()=>setTagImg(null)} style={{background:'none',border:`1px solid ${T.border}`,borderRadius:6,color:T.textMuted,padding:'3px 8px',fontSize:11,fontWeight:700,cursor:'pointer'}}>Remove</button>
-          </div>
-          :<button onClick={()=>tagFileRef.current.click()} style={{width:'100%',background:T.timed+'0d',border:`1.5px dashed ${T.timed}44`,borderRadius:10,padding:'9px',color:T.timed,fontWeight:700,fontSize:12,marginBottom:12,display:'flex',alignItems:'center',justifyContent:'center',gap:6,cursor:'pointer'}}><I n="camera" sz={14} c={T.timed}/> Add receipt photo (optional)</button>}
-        <div style={{display:'flex',gap:8}}>
-          <Btn small color={T.business} onClick={()=>saveTag(t)} style={{flex:1}}>Save expense · {fmt(t.amount)}</Btn>
-          <Btn small outline color={T.textMuted} onClick={()=>{setTagging(null);setTagImg(null);}}>Cancel</Btn>
-        </div>
-        <div style={{fontSize:10,color:T.textFaint,marginTop:8,lineHeight:1.5}}>No receipt? For things like TfL your bank statement is usually evidence enough — you can also attach a photo later from the receipt's detail page.</div>
-      </div>
-    )}
-  </div>);
-})}
-</>)}
-</Page>);}
-
 // ── INVOICE ──────────────────────────────────────────────────────────────────
-function InvoiceView({entries,receipts,invoices,clients=[],onAddInvoice,onUpdateInvoice,onDeleteInvoice,onUpdateReceipt,onSaveClient,onAddEntry,settings,setSettings,sheetsUrl,starlingQueue,setStarlingQueue,pendingFeedTxn,setPendingFeedTxn}){
+function InvoiceView({entries,receipts,invoices,clients=[],onAddInvoice,onUpdateInvoice,onDeleteInvoice,onUpdateReceipt,onSaveClient,onAddEntry,settings,setSettings,sheetsUrl}){
 const[mode,setMode]=useState('list');const[selE,setSelE]=useState({});const[selR,setSelR]=useState({});const[client,setClient]=useState({name:'',email:'',address:''});const[selectedClientId,setSelectedClientId]=useState(null);const oneMonthFromNow=()=>{const d=new Date();d.setMonth(d.getMonth()+1);return d.toISOString().split('T')[0];};const[dueDate,setDueDate]=useState(oneMonthFromNow());const[notes,setNotes]=useState(settings.bankDetails||'');const[flash,setFlash]=useState(false);const[docUrl,setDocUrl]=useState(null);const[creatingDoc,setCreatingDoc]=useState(false);const[docErr,setDocErr]=useState(null);const[docStatus,setDocStatus]=useState('');const[confInvId,setConfInvId]=useState(null);const[saveClientFlash,setSaveClientFlash]=useState(false);const[deductions,setDeductions]=useState([]);const addDeduction=()=>setDeductions(d=>[...d,{id:Date.now().toString(),description:'',amount:''}]);const updateDeduction=(id,k,v)=>setDeductions(d=>d.map(x=>x.id===id?{...x,[k]:v}:x));const removeDeduction=id=>setDeductions(d=>d.filter(x=>x.id!==id));
 const sc=(k,v)=>setClient(c=>({...c,[k]:v}));const pickClient=c=>{setClient({name:c.name,email:c.email||'',address:c.address||''});setSelectedClientId(c.id);};const handleSaveClient=()=>{if(!client.name)return;onSaveClient({name:client.name,email:client.email||'',address:client.address||''});setSaveClientFlash(true);setTimeout(()=>setSaveClientFlash(false),1800);};
-// Starling invoice-sync state
-const[stSync,setStSync]=useState('idle');const[stMatches,setStMatches]=useState([]);const[stUnmatched,setStUnmatched]=useState([]);const[stErr,setStErr]=useState(null);
-const unmatchedReal=stUnmatched.filter(t=>!invoices.some(iv=>Math.abs((iv.subtotal||0)-(t.amount||0))<0.02&&datesClose(iv.date,t.date)));
 const[chaseOpen,setChaseOpen]=useState(null);const[chaseSending,setChaseSending]=useState(null);const[chaseResult,setChaseResult]=useState({});
-// Seed from App-level auto-sync on first mount
-useEffect(()=>{
-  if(starlingQueue&&(starlingQueue.matches.length||starlingQueue.unmatched.length)){
-    setStMatches(starlingQueue.matches);setStUnmatched(starlingQueue.unmatched);setStSync('done');
-  }
-},[]);
-// Handle income transaction sent from Bank Feed ("Make Invoice" or "Log only")
-useEffect(()=>{
-  if(!pendingFeedTxn)return;
-  const{txn,mode}=pendingFeedTxn;
-  setPendingFeedTxn(null);
-  if(mode==='invoice'){makeInvoiceFromTxn(txn);}
-  else{handleTaxOnly(txn);}
-// eslint-disable-next-line react-hooks/exhaustive-deps
-},[pendingFeedTxn]);
-// Tax pot prompt state
-const[taxPrompt,setTaxPrompt]=useState(null);// {invId,invNum,amount,taxAmt,taxPct,starlingData,fromStarling,alreadyPaid}
-const[taxTransferring,setTaxTransferring]=useState(false);const[taxResult,setTaxResult]=useState(null);// 'ok'|'err'|null
-const[taxErrMsg,setTaxErrMsg]=useState(null);
-// ── Payment splitter: editable amounts per Space, prefilled from your % settings ──
-const[splits,setSplits]=useState([]);
-const buildSplits=(amount)=>{
-  const taxPct=parseFloat(settings.taxPercent??20);
-  const holPct=parseFloat(settings.holidayPayPercent??12.07);
-  const out=[];
-  // Tax pot: prefer savings account over Space if configured
-  if(settings.starlingTaxSavingsUid&&settings.starlingTaxSavingsSortCode&&settings.starlingTaxSavingsAccountNumber){
-    out.push({uid:settings.starlingTaxSavingsUid,name:settings.starlingTaxSavingsName||'Tax (Easy Saver)',amt:(amount*taxPct/100).toFixed(2),pct:taxPct,color:T.lumpGreen,type:'savings',sortCode:settings.starlingTaxSavingsSortCode,accountNumber:settings.starlingTaxSavingsAccountNumber});
-  }else if(settings.starlingTaxSpaceUid){
-    out.push({uid:settings.starlingTaxSpaceUid,name:settings.starlingTaxSpaceName||'Tax',amt:(amount*taxPct/100).toFixed(2),pct:taxPct,color:T.lumpGreen,type:'space'});
-  }
-  // Holiday pot: prefer savings account over Space if configured
-  if(settings.starlingHolidaySavingsUid&&settings.starlingHolidaySavingsSortCode&&settings.starlingHolidaySavingsAccountNumber){
-    out.push({uid:settings.starlingHolidaySavingsUid,name:settings.starlingHolidaySavingsName||'Holiday (Easy Saver)',amt:(amount*holPct/100).toFixed(2),pct:holPct,color:T.timed,type:'savings',sortCode:settings.starlingHolidaySavingsSortCode,accountNumber:settings.starlingHolidaySavingsAccountNumber});
-  }else if(settings.starlingHolidaySpaceUid){
-    out.push({uid:settings.starlingHolidaySpaceUid,name:settings.starlingHolidaySpaceName||'Holiday',amt:(amount*holPct/100).toFixed(2),pct:holPct,color:T.timed,type:'space'});
-  }
-  // Any other Spaces from the last balance fetch — start at £0
-  const cacheGoals=(LS.get('mhq-money-cache')?.snap?.goals)||[];
-  cacheGoals.forEach(g=>{if(g.uid&&g.uid!==settings.starlingTaxSpaceUid&&g.uid!==settings.starlingHolidaySpaceUid)out.push({uid:g.uid,name:g.name,amt:'',pct:null,color:T.manual,type:'space'});});
-  return out;
-};
-const setSplitAmt=(uid,v)=>setSplits(p=>p.map(s=>s.uid===uid?{...s,amt:v.replace(/[^\d.]/g,'')}:s));
-const splitTotal=splits.reduce((a,s)=>a+(parseFloat(s.amt)||0),0);
-
-const handleMarkPaid=(inv,starlingData={},fromStarling=false)=>{
-  const taxPct=parseFloat(settings.taxPercent??20);
-  const holPct=parseFloat(settings.holidayPayPercent??12.07);
-  const taxAmt=parseFloat(((inv.subtotal||0)*taxPct/100).toFixed(2));
-  const holAmt=parseFloat(((inv.subtotal||0)*holPct/100).toFixed(2));
-  const hasTax=false; // pot transfers removed — mark paid only, no transfer prompt
-  const hasHol=false;
-  if(hasTax||hasHol){
-    setSplits(buildSplits(inv.subtotal||0));
-    setTaxPrompt({invId:inv.id,invNum:inv.invoiceNum,amount:inv.subtotal,taxAmt,taxPct,holAmt,holPct,starlingData,fromStarling});
-  }else{
-    onUpdateInvoice(inv.id,{status:'paid',paidDate:new Date().toISOString(),potted:'skipped',...starlingData});
-    if(fromStarling)setStMatches(p=>p.filter(m=>m.inv.id!==inv.id));
-  }
-};
-const handleTaxOnly=(txn)=>{
-  // Log the uninvoiced payment as income — no pot/transfer prompt
-  setStUnmatched(p=>p.filter(t=>t.id!==txn.id));
-  if(setStarlingQueue)setStarlingQueue(q=>({...q,unmatched:q.unmatched.filter(t=>t.id!==txn.id)}));
-  if(onAddEntry)onAddEntry({date:txn.date,description:txn.counterParty||txn.ref||'Payment',client:txn.counterParty||'',subtotal:txn.amount,type:'lump',status:'Paid',starlingTxnId:txn.id,starlingRef:txn.ref||txn.counterParty});
-};
-// Turn an incoming payment into a proper (already-paid) invoice — for clients who ask for one
-const makeInvoiceFromTxn=(txn)=>{
-  const num=invNum;
-  const inv={id:mkId(),invoiceNum:num,date:txn.date?new Date(txn.date+'T12:00:00').toISOString():new Date().toISOString(),client:txn.counterParty||txn.ref||'Client',clientEmail:'',subtotal:txn.amount,incomeTotal:txn.amount,reimbTotal:0,deductTotal:0,deductions:[],dueDate:'',entryIds:[],reimbIds:[],docUrl:null,status:'paid',paidDate:new Date().toISOString(),starlingTxnId:txn.id,starlingRef:txn.ref||txn.counterParty,starlingDate:txn.date};
-  onAddInvoice(inv);
-  setSettings(s=>({...s,invoiceCounter:(s.invoiceCounter||1)+1}));
-  setStUnmatched(p=>p.filter(t=>t.id!==txn.id));
-  if(setStarlingQueue)setStarlingQueue(q=>({...q,unmatched:q.unmatched.filter(t=>t.id!==txn.id)}));
-  // pot transfer prompt removed — invoice is created and marked paid above
-};
-const doMarkPaid=(withTransfer)=>async()=>{
-  if(!taxPrompt)return;
-  setTaxTransferring(true);setTaxResult(null);setTaxErrMsg(null);
-  // 1. Do the pot transfer FIRST — if it fails, nothing gets marked done and you can retry
-  let transferOk=null;
-  const activeSplits=splits.filter(s=>(parseFloat(s.amt)||0)>0);
-  if(withTransfer&&settings.starlingToken&&!settings.starlingPotsTrackOnly){
-    if(!activeSplits.length){setTaxErrMsg('Enter an amount next to at least one pot first (or use the skip button below).');setTaxResult('err');setTaxTransferring(false);return;}
-    const totalSplit=activeSplits.reduce((a,s)=>a+parseFloat(s.amt),0);
-    if(totalSplit>(taxPrompt.amount||0)+0.005){setTaxErrMsg('Split total ('+fmt(totalSplit)+') is more than the payment ('+fmt(taxPrompt.amount||0)+') — reduce the amounts.');setTaxResult('err');setTaxTransferring(false);return;}
-    Starling.init(settings.starlingToken,settings.starlingSandbox,settings.sheetsUrl);
-    let accountUid=settings.starlingAccountUid;
-    let categoryUid=settings.starlingDefaultCategoryUid;
-    if(!accountUid||!categoryUid){try{const accs=await Starling.getAccounts();const primary=accs?.accounts?.find(a=>a.accountType==='PRIMARY')||accs?.accounts?.[0];if(primary){accountUid=accountUid||primary.accountUid||'';categoryUid=categoryUid||primary.defaultCategory||'';}}catch{}}
-    const results=[];
-    for(const s of activeSplits){
-      if(s.type==='savings'&&s.sortCode&&s.accountNumber){
-        results.push(await Starling.makeLocalPayment(accountUid,categoryUid,s.sortCode,s.accountNumber,s.name,'Tax/Holiday savings',Math.round(parseFloat(s.amt)*100)));
-      }else{
-        results.push(await Starling.addToSavingsGoal(accountUid,s.uid,Math.round(parseFloat(s.amt)*100)));
-      }
-    }
-    transferOk=results.length>0&&results.every(r=>r&&r.ok);
-    if(!transferOk){
-      const firstErr=results.find(r=>!r||!r.ok);
-      setTaxErrMsg((firstErr&&firstErr.error)||'Transfer failed — unknown error.');
-      setTaxResult('err');setTaxTransferring(false);
-      return; // keep the prompt open so you can retry or skip
-    }
-  }
-  // 2. Transfer succeeded (or was skipped) — now do the bookkeeping
-  const potted=withTransfer?'done':'skipped';
-  if(taxPrompt.invId){
-    onUpdateInvoice(taxPrompt.invId,{...(taxPrompt.alreadyPaid?{}:{status:'paid',paidDate:new Date().toISOString()}),potted,...(taxPrompt.starlingData||{})});
-    if(taxPrompt.fromStarling){setStMatches(p=>p.filter(m=>m.inv.id!==taxPrompt.invId));if(setStarlingQueue)setStarlingQueue(q=>({...q,matches:q.matches.filter(m=>m.inv.id!==taxPrompt.invId)}));}
-  }
-  if(taxPrompt.fromUnmatched){
-    setStUnmatched(p=>p.filter(t=>t.id!==taxPrompt.fromUnmatched));
-    if(setStarlingQueue)setStarlingQueue(q=>({...q,unmatched:q.unmatched.filter(t=>t.id!==taxPrompt.fromUnmatched)}));
-    if(taxPrompt.unmatchedTxn&&onAddEntry){
-      const t=taxPrompt.unmatchedTxn;
-      onAddEntry({date:t.date,description:t.counterParty||t.ref||'Payment',client:t.counterParty||'',subtotal:t.amount,type:'lump',status:'Paid',starlingTxnId:t.id,starlingRef:t.ref||t.counterParty});
-    }
-  }
-  if(withTransfer){
-    setTaxResult('ok');
-    setTimeout(()=>{setTaxResult(null);setTaxPrompt(null);setTaxTransferring(false);},2200);
-  }else{
-    setTaxPrompt(null);setTaxTransferring(false);
-  }
-};
-// Re-open the pot prompt for an invoice that's already paid but never potted
-const handlePotNow=(inv)=>{
-  const taxPct=parseFloat(settings.taxPercent??20);
-  const holPct=parseFloat(settings.holidayPayPercent??12.07);
-  const taxAmt=parseFloat(((inv.subtotal||0)*taxPct/100).toFixed(2));
-  const holAmt=parseFloat(((inv.subtotal||0)*holPct/100).toFixed(2));
-  setSplits(buildSplits(inv.subtotal||0));
-  setTaxPrompt({invId:inv.id,invNum:inv.invoiceNum,amount:inv.subtotal,taxAmt,taxPct,holAmt,holPct,starlingData:{},alreadyPaid:true});
-};
-// Paid invoices that never had tax/holiday potted (e.g. auto-marked paid by the
-// background Sheets trigger, or potting was skipped/failed) — resurface for 45 days
-const potsConfigured=settings.starlingToken&&(settings.starlingTaxSpaceUid||settings.starlingHolidaySpaceUid);
-const needsPotting=[]; // pot transfers removed — no "paid but not potted" nag
-const syncStarling=async()=>{
-  if(!settings.starlingToken)return;
-  setStSync('loading');setStErr(null);
-  Starling.init(settings.starlingToken,settings.starlingSandbox,settings.sheetsUrl);
-  let txns=null;
-  try{txns=await Starling.fetchRecent(90);}catch(e){setStSync('err');setStErr(e.status===403?'Token rejected (403) — check scopes at developer.starlingbank.com.':e.status===401?'Token invalid or expired (401) — generate a new one.':'Could not reach Starling: '+(e.message||'network error'));return;}
-  if(!txns){setStSync('err');setStErr('No accounts found on this token. Check it at developer.starlingbank.com.');return;}
-  LS.set('mhq-starling-cache',{t:Date.now(),sandbox:!!settings.starlingSandbox,txns});
-  const inTxns=txns.filter(t=>t.direction==='IN');
-  const unpaid=invoices.filter(i=>i.status!=='paid');
-  const{matches,usedTxnIds}=matchInvoicesToTxns(inTxns,unpaid);
-  // Collect already-potted txn IDs from all invoices and receipts
-  const pottedIds=new Set([
-    ...invoices.filter(i=>i.starlingTxnId).map(i=>i.starlingTxnId),
-    ...receipts.filter(r=>r.starlingTxnId).map(r=>r.starlingTxnId),
-    ...[...usedTxnIds],
-  ]);
-  const unmatched=inTxns.filter(t=>!pottedIds.has(t.id)&&t.amount>0);
-  setStMatches(matches);
-  setStUnmatched(unmatched);
-  setStSync('done');
-  if(setStarlingQueue)setStarlingQueue(q=>({...q,matches,unmatched,lastSync:new Date()}));
-};
+const handleMarkPaid=(inv)=>{onUpdateInvoice(inv.id,{status:'paid',paidDate:new Date().toISOString(),potted:'skipped'});};
 const invNum=`INV-${new Date().getFullYear()}-${String(settings.invoiceCounter||1).padStart(3,'0')}`;
 const selEntries=entries.filter(e=>selE[e.id]);const selReimbs=receipts.filter(r=>selR[r.id]);const incomeTotal=selEntries.reduce((a,e)=>a+(e.subtotal||0),0);const reimbTotal=selReimbs.reduce((a,r)=>a+(r.amount||0),0);const deductTotal=deductions.reduce((a,d)=>a+(parseFloat(d.amount)||0),0);const grandTotal=Math.max(0,incomeTotal+reimbTotal-deductTotal);const pendingReimbs=receipts.filter(r=>r.category==='reimbursable'&&r.status==='pending');const hasItems=selEntries.length>0||selReimbs.length>0;
 const invoicePeriod=(()=>{const dates=selEntries.map(e=>e.date).sort();if(dates.length===0)return new Date().toLocaleDateString('en-GB',{month:'long',year:'numeric'});const first=new Date(dates[0]+'T12:00:00');const last=new Date(dates[dates.length-1]+'T12:00:00');const fStr=first.toLocaleDateString('en-GB',{month:'long',year:'numeric'});const lStr=last.toLocaleDateString('en-GB',{month:'long',year:'numeric'});return fStr===lStr?fStr:`${fStr} to ${lStr}`;})();
@@ -1559,83 +905,6 @@ return(<Page>
 <div style={{fontFamily:'Space Mono,monospace',fontSize:18,fontWeight:700,marginBottom:4}}>Invoices</div>
 <div style={{fontSize:13,color:T.textMuted,marginBottom:18}}>{invoices.length} raised, next: {invNum}</div>
 <Btn full onClick={()=>{setMode('build');setSelE({});setSelR({});setDocUrl(null);}} style={{marginBottom:10}}>New Invoice</Btn>
-{settings.starlingToken&&(<button onClick={syncStarling} disabled={stSync==='loading'} style={{width:'100%',background:stSync==='done'?T.lumpGreen+'10':T.surface,border:`1.5px solid ${stSync==='done'?T.lumpGreen+'44':T.border}`,borderRadius:14,padding:'11px 14px',color:stSync==='done'?T.lumpGreen:T.textMuted,fontWeight:700,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',gap:8,marginBottom:10,cursor:'pointer',opacity:stSync==='loading'?0.6:1}}>
-  {stSync==='loading'?<><Spinner/> Checking Starling…</>:<>🏦 {stSync==='done'?`Starling synced · ${stMatches.length} match${stMatches.length!==1?'es':''}`:stSync==='err'?'Starling error — tap to retry':'Sync Starling payments'}</>}
-</button>)}
-{stErr&&<div style={{fontSize:12,color:T.danger,background:T.dangerBg,borderRadius:10,padding:'8px 12px',marginBottom:10}}>{stErr}</div>}
-{needsPotting.length>0&&(<div style={{marginBottom:14}}>
-  <div style={{fontSize:11,fontWeight:700,color:T.danger,letterSpacing:1,textTransform:'uppercase',marginBottom:4}}>⚠ Paid but not potted</div>
-  <div style={{fontSize:12,color:T.textMuted,marginBottom:10,lineHeight:1.5}}>These invoices were marked paid (some automatically by the background sync) but no tax/holiday was moved to your Spaces yet.</div>
-  {needsPotting.map(inv=>{
-    const taxPct=parseFloat(settings.taxPercent??20);const holPct=parseFloat(settings.holidayPayPercent??12.07);
-    const owed=(inv.subtotal||0)*((settings.starlingTaxSpaceUid?taxPct:0)+(settings.starlingHolidaySpaceUid?holPct:0))/100;
-    return(<div key={inv.id} style={{background:T.danger+'08',border:`1.5px solid ${T.danger}44`,borderRadius:12,padding:'10px 13px',marginBottom:8}}>
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:10,marginBottom:8}}>
-        <div style={{minWidth:0}}>
-          <div style={{fontFamily:'Space Mono,monospace',fontSize:12,color:T.accent,marginBottom:2}}>{inv.invoiceNum}</div>
-          <div style={{fontWeight:700,fontSize:14}}>{inv.client||'No client'}</div>
-          <div style={{fontSize:11,color:T.textMuted,marginTop:2}}>Paid {fmtD((inv.paidDate||'').split('T')[0])} · {fmt(owed)} to set aside</div>
-        </div>
-        <div style={{fontFamily:'Space Mono,monospace',fontSize:15,fontWeight:700,flexShrink:0}}>{fmt(inv.subtotal)}</div>
-      </div>
-      <div style={{display:'flex',gap:8}}>
-        <button onClick={()=>handlePotNow(inv)} style={{flex:1,background:T.lumpGreen+'14',border:`1.5px solid ${T.lumpGreen}44`,borderRadius:10,padding:'7px 10px',color:T.lumpGreen,fontWeight:700,fontSize:12,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:5}}>
-          <I n="money" sz={13} c={T.lumpGreen}/> Pot tax now
-        </button>
-        <button onClick={()=>onUpdateInvoice(inv.id,{potted:'skipped'})} style={{background:'none',border:`1px solid ${T.border}`,borderRadius:10,padding:'7px 10px',color:T.textFaint,fontWeight:700,fontSize:12,cursor:'pointer'}}>✕</button>
-      </div>
-    </div>);
-  })}
-</div>)}
-{stMatches.length>0&&(<div style={{marginBottom:14}}>
-  <div style={{fontSize:11,fontWeight:700,color:T.lumpGreen,letterSpacing:1,textTransform:'uppercase',marginBottom:8}}>Payments matched</div>
-  {stMatches.map(({inv,txn,by})=>(
-    <div key={inv.id} style={{background:T.lumpGreen+'0d',border:`1.5px solid ${T.lumpGreen}44`,borderRadius:12,padding:'10px 13px',marginBottom:8}}>
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:10,marginBottom:8}}>
-        <div style={{minWidth:0}}>
-          <div style={{fontFamily:'Space Mono,monospace',fontSize:12,color:T.accent,marginBottom:2}}>{inv.invoiceNum}</div>
-          <div style={{fontWeight:700,fontSize:14}}>{inv.client||'No client'}</div>
-          <div style={{fontSize:11,color:T.textMuted,marginTop:2}}>Payment from <strong style={{color:T.text}}>{txn.counterParty||txn.ref||'Starling'}</strong> on {txn.date}{by==='ref'&&<span style={{color:T.lumpGreen,fontWeight:700}}> · matched by reference</span>}</div>
-        </div>
-        <div style={{fontFamily:'Space Mono,monospace',fontSize:15,fontWeight:700,color:T.lumpGreen,flexShrink:0}}>{fmt(txn.amount)}</div>
-      </div>
-      {inv.status!=='paid'&&onUpdateInvoice&&(<button onClick={()=>handleMarkPaid(inv,{starlingTxnId:txn.id,starlingRef:txn.ref||txn.counterParty,starlingDate:txn.date},true)} style={{width:'100%',background:T.lumpGreen+'20',border:`1.5px solid ${T.lumpGreen}66`,borderRadius:10,padding:'8px 14px',color:T.lumpGreen,fontWeight:700,fontSize:13,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:6}}>
-        <I n="check" sz={15} c={T.lumpGreen}/> Mark as paid
-      </button>)}
-      {inv.status==='paid'&&<div style={{fontSize:12,color:T.lumpGreen,textAlign:'center',fontWeight:700}}>✓ Already marked paid</div>}
-    </div>
-  ))}
-</div>)}
-{stSync==='done'&&stMatches.length===0&&stUnmatched.length===0&&(
-  <div style={{fontSize:12,color:T.textMuted,background:'#ffffff',borderRadius:10,padding:'10px 13px',marginBottom:10,lineHeight:1.6}}>
-    <div style={{fontWeight:700,color:T.text,marginBottom:4}}>No payments found to action</div>
-    <div>Possible reasons: all incoming payments are already linked to an invoice or receipt, or there are no incoming payments in the last 90 days. If you expected a match, check that your invoice is still in <strong>Pending</strong> status (paid invoices are excluded from matching).</div>
-  </div>
-)}
-{unmatchedReal.length>0&&(<div style={{marginBottom:14}}>
-  <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1,textTransform:'uppercase',marginBottom:4}}>Uninvoiced payments</div>
-  <div style={{fontSize:12,color:T.textMuted,marginBottom:10,lineHeight:1.5}}>Incoming payments with no matching invoice. Confirm income logs it — or make it a proper paid invoice if the client wants one.</div>
-  {unmatchedReal.map(txn=>(
-    <div key={txn.id} style={{background:T.surface,border:`1.5px solid ${T.border}`,borderRadius:12,padding:'10px 13px',marginBottom:8}}>
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:10,marginBottom:8}}>
-        <div style={{minWidth:0}}>
-          <div style={{fontWeight:700,fontSize:14,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{txn.counterParty||txn.ref||'Payment'}</div>
-          <div style={{fontSize:11,color:T.textMuted,marginTop:2}}>{txn.date}{txn.ref&&txn.counterParty?` · ${txn.ref}`:''}</div>
-        </div>
-        <div style={{fontFamily:'Space Mono,monospace',fontSize:15,fontWeight:700,color:T.lumpGreen,flexShrink:0}}>{fmt(txn.amount)}</div>
-      </div>
-      <div style={{display:'flex',gap:8}}>
-        <button onClick={()=>handleTaxOnly(txn)} style={{flex:1,background:T.lumpGreen+'14',border:`1.5px solid ${T.lumpGreen}44`,borderRadius:10,padding:'7px 10px',color:T.lumpGreen,fontWeight:700,fontSize:12,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:5}}>
-          <I n="money" sz={13} c={T.lumpGreen}/> Confirm income
-        </button>
-        <button onClick={()=>makeInvoiceFromTxn(txn)} style={{flex:1,background:T.accent+'14',border:`1.5px solid ${T.accent}44`,borderRadius:10,padding:'7px 10px',color:T.accent,fontWeight:700,fontSize:12,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:5}}>
-          <I n="invoice" sz={13} c={T.accent}/> Make invoice
-        </button>
-        <button onClick={()=>setStUnmatched(p=>p.filter(t=>t.id!==txn.id))} style={{background:'none',border:`1px solid ${T.border}`,borderRadius:10,padding:'7px 10px',color:T.textFaint,fontWeight:700,fontSize:12,cursor:'pointer'}}>✕</button>
-      </div>
-    </div>
-  ))}
-</div>)}
 {invoices.length===0?(<div style={{textAlign:'center',padding:'40px 20px',color:T.textMuted}}><div style={{fontSize:40,marginBottom:10}}>📄</div><div style={{fontWeight:700,marginBottom:4}}>No invoices yet</div></div>):(()=>{
   const today0=new Date();today0.setHours(0,0,0,0);
   const isOverdue=inv=>inv.status!=='paid'&&inv.dueDate&&new Date(inv.dueDate+'T12:00:00')<today0;
@@ -1706,41 +975,6 @@ ${settings.name||''}`;
     </Card>);
   });
 })()}
-{taxPrompt&&(<div style={{position:'fixed',inset:0,background:'rgba(9,7,12,.85)',zIndex:200,display:'flex',alignItems:'flex-end',justifyContent:'center'}}>
-  <div style={{width:'100%',maxWidth:480,background:T.surface,borderRadius:'20px 20px 0 0',padding:'24px 20px 36px',border:`1px solid ${T.lumpGreen}44`}}>
-    <div style={{fontWeight:700,fontSize:17,marginBottom:4}}>{taxPrompt.invId?'💰 Invoice paid':'💰 Pot the tax'}</div>
-    <div style={{fontSize:13,color:T.textMuted,marginBottom:16,lineHeight:1.6}}>{taxPrompt.invNum} · {fmt(taxPrompt.amount||0)}</div>
-    <div style={{marginBottom:12}}>
-      {splits.length===0&&<div style={{fontSize:12,color:T.textMuted,background:'#f2f1ea',borderRadius:10,padding:'10px 12px',border:`1px solid ${T.border}`}}>No Spaces set up yet — pick your pots in Settings → Savings pots.</div>}
-      {splits.map(s=>(
-        <div key={s.uid} style={{display:'flex',alignItems:'center',gap:10,background:s.color+'0d',border:`1.5px solid ${s.color}33`,borderRadius:12,padding:'9px 12px',marginBottom:7}}>
-          <div style={{flex:1,minWidth:0}}>
-            <div style={{fontWeight:700,fontSize:13,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',color:s.color}}>{s.name}</div>
-            {s.pct!=null?<div style={{fontSize:10,color:T.textMuted}}>{s.pct}% of payment</div>:<div style={{fontSize:10,color:T.textFaint}}>optional</div>}
-          </div>
-          <div style={{display:'flex',alignItems:'center',gap:4,flexShrink:0}}>
-            <span style={{color:T.textMuted,fontSize:13}}>£</span>
-            <input type="text" inputMode="decimal" value={s.amt} onChange={e=>setSplitAmt(s.uid,e.target.value)} placeholder="0.00" style={{...iBase,width:88,padding:'8px 10px',fontFamily:'Space Mono,monospace',fontSize:14,textAlign:'right'}}/>
-          </div>
-        </div>
-      ))}
-    </div>
-    {splits.length>0&&(<div style={{fontSize:12,color:T.textMuted,marginBottom:14,textAlign:'center'}}>
-      To pots: <strong style={{color:splitTotal>(taxPrompt.amount||0)+0.005?T.danger:T.text}}>{fmt(splitTotal)}</strong> · stays in account: <strong style={{color:T.text}}>{fmt(Math.max(0,(taxPrompt.amount||0)-splitTotal))}</strong>
-      {splitTotal>(taxPrompt.amount||0)+0.005&&<div style={{color:T.danger,fontWeight:700,marginTop:4}}>Split is more than the payment — reduce the amounts.</div>}
-    </div>)}
-    {settings.starlingPotsTrackOnly&&splits.length>0&&<div style={{fontSize:11,color:T.timed,background:T.timed+'12',border:`1px solid ${T.timed}33`,borderRadius:10,padding:'9px 12px',marginBottom:10,lineHeight:1.5}}>📱 Track only mode — move these amounts manually to your savings account (Monzo pot, Starling Easy Saver, etc.)</div>}
-    {taxResult==='ok'&&<div style={{fontSize:13,color:T.lumpGreen,fontWeight:700,textAlign:'center',marginBottom:12}}>{settings.starlingPotsTrackOnly?'✓ Logged — move the amounts to your savings account':'✓ Transferred — money is in your Spaces'}</div>}
-    {taxResult==='err'&&<div style={{fontSize:12,color:T.danger,fontWeight:700,background:T.danger+'12',border:`1px solid ${T.danger}44`,borderRadius:10,padding:'10px 12px',marginBottom:12,lineHeight:1.5}}>✗ {taxErrMsg||'Transfer failed — check your token has write access'}</div>}
-    {taxResult!=='ok'&&(<div style={{display:'flex',flexDirection:'column',gap:10}}>
-      <Btn full color={taxTransferring?T.timed:T.lumpGreen} onClick={doMarkPaid(true)} disabled={taxTransferring}>
-        {taxTransferring?<><Spinner/> Saving…</>:taxResult==='err'?<><I n="sync" sz={16} c="#08060c"/> Retry</>:<><I n="paid" sz={16} c="#08060c"/> {settings.starlingPotsTrackOnly?(taxPrompt.alreadyPaid?'Log split (move manually)':'Mark paid + log split'):(taxPrompt.alreadyPaid?'Split to pots':'Mark paid + split to pots')}</>}
-      </Btn>
-      <button onClick={doMarkPaid(false)} disabled={taxTransferring} style={{background:'none',border:`1px solid ${T.border}`,borderRadius:14,padding:'12px',color:T.textMuted,fontWeight:700,fontSize:13,cursor:'pointer'}}>{taxPrompt.alreadyPaid?"Skip — don't pot this one":taxPrompt.invId?'Mark paid, skip transfer':'Log income, skip transfer'}</button>
-      <button onClick={()=>{setTaxPrompt(null);setTaxResult(null);setTaxErrMsg(null);}} disabled={taxTransferring} style={{background:'none',border:'none',color:T.textFaint,fontSize:12,padding:'4px',cursor:'pointer'}}>Cancel</button>
-    </div>)}
-  </div>
-</div>)}
 </Page>);}
 
 // ── REPORTS ──────────────────────────────────────────────────────────────────
@@ -1807,7 +1041,7 @@ const exportIncome=()=>{const rows=[['ID','Invoice Ref','Date','Client','Descrip
 
 const exportExpenses=()=>{const rows=[['ID','Date','Description','Type','Category','Amount','Status','Paid By','Owed By','Drive Link']];const allInRange=receipts.filter(r=>inRange(r.date));allInRange.forEach(r=>rows.push([r.id||'',r.date,r.description||'',r.category,r.subcategory?catLabel(r.subcategory):'',(r.amount||0).toFixed(2),r.status||'pending',r.paidBy||'',r.owedBy||'',r.driveUrl||'']));rows.push([],[' ','Business expenses','','',totBiz.toFixed(2)],[' ','Still owed to you','','',totPend.toFixed(2)],[' ','Reimbursed','','',totPaid.toFixed(2)]);dlCSV(rows,`expenses_${rangeLabel().replace(/\s/g,'_')}_${today()}.csv`);};
 
-const exportBackup=()=>{const KEYS=['mhq-entries','mhq-receipts','mhq-invoices','mhq-clients','mhq-settings','mhq-feed-personal','mhq-feed-not-income','mhq-money-cache','mhq-starling-cache','mhq-trash'];const keys={};KEYS.forEach(k=>{try{const v=localStorage.getItem(k);if(v!=null)keys[k]=JSON.parse(v);}catch{}});const blob=new Blob([JSON.stringify({app:'money-tracker-backup',v:1,exportedAt:new Date().toISOString(),keys},null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`money-backup-${today()}.json`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1500);};
+const exportBackup=()=>{const KEYS=['mhq-entries','mhq-receipts','mhq-invoices','mhq-clients','mhq-settings','mhq-trash'];const keys={};KEYS.forEach(k=>{try{const v=localStorage.getItem(k);if(v!=null)keys[k]=JSON.parse(v);}catch{}});const blob=new Blob([JSON.stringify({app:'money-tracker-backup',v:1,exportedAt:new Date().toISOString(),keys},null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`money-backup-${today()}.json`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1500);};
 const importBackup=()=>{const inp=document.createElement('input');inp.type='file';inp.accept='application/json,.json';inp.onchange=()=>{const f=inp.files&&inp.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{const j=JSON.parse(r.result);const keys=j.keys||j.data||j;let n=0;Object.keys(keys).forEach(k=>{if(/^mhq-/.test(k)){localStorage.setItem(k,JSON.stringify(keys[k]));n++;}});if(!n){alert('No Float / Honey data found in that file.');return;}alert('Imported '+n+' data set'+(n>1?'s':'')+'. Honey will now reload.');location.reload();}catch(e){alert('That file is not a valid backup.');}};r.readAsText(f);};inp.click();};
 const exportTaxYear=()=>{
   const year=range==='lastTax'?currentTaxYearStart-1:currentTaxYearStart;
@@ -2133,89 +1367,6 @@ function doGet(e) {
         result = { ok: true };
       }
 
-    } else if (action === 'fetchStarlingSpaces') {
-      var sToken = e.parameter.token || '';
-      if (!sToken) { result = { error: 'No token' }; }
-      else {
-        try {
-          var accsResp = UrlFetchApp.fetch('https://api.starlingbank.com/api/v2/accounts', {headers:{'Authorization':'Bearer '+sToken,'Accept':'application/json'},muteHttpExceptions:true});
-          var accsData = JSON.parse(accsResp.getContentText());
-          if (!accsData.accounts || !accsData.accounts.length) { result = {error:'No accounts found on this token.'}; }
-          else {
-            var accountUid = accsData.accounts[0].accountUid;
-            var goals = [];
-            try {
-              var sgResp = UrlFetchApp.fetch('https://api.starlingbank.com/api/v2/account/'+accountUid+'/savings-goals',{headers:{'Authorization':'Bearer '+sToken,'Accept':'application/json'},muteHttpExceptions:true});
-              var sgData = JSON.parse(sgResp.getContentText());
-              goals = (sgData.savingsGoalList||[]).map(function(g){return{savingsGoalUid:g.savingsGoalUid,name:g.name};});
-            } catch(e2){}
-            if (!goals.length) {
-              try {
-                var spResp = UrlFetchApp.fetch('https://api.starlingbank.com/api/v2/account/'+accountUid+'/spaces',{headers:{'Authorization':'Bearer '+sToken,'Accept':'application/json'},muteHttpExceptions:true});
-                var spData = JSON.parse(spResp.getContentText());
-                var ss2=(spData.savingsGoalSpaces||[]).map(function(s){return{savingsGoalUid:s.savingsGoalUid||s.spaceUid,name:s.name};});
-                var sp2=(spData.spendingSpaces||[]).map(function(s){return{savingsGoalUid:s.spaceUid,name:s.name+' (spending)'};});
-                goals=[].concat(ss2,sp2);
-              } catch(e3){}
-            }
-            result = {goals:goals, accountUid:accountUid};
-          }
-        } catch(e4) { result = {error:'Could not reach Starling: '+e4.toString()}; }
-      }
-    } else if (action === 'saveStarlingToken') {
-      var sTok = e.parameter.token || '';
-      if (!sTok) { result = {error:'No token provided'}; }
-      else {
-        try {
-          PropertiesService.getScriptProperties().setProperty('STARLING_TOKEN', sTok);
-          var existingTriggers = ScriptApp.getProjectTriggers();
-          var hasTrigger = existingTriggers.some(function(t){ return t.getHandlerFunction() === 'syncStarlingToSheet'; });
-          if (!hasTrigger) { ScriptApp.newTrigger('syncStarlingToSheet').timeBased().everyMinutes(30).create(); }
-          result = {ok:true, triggerSet:!hasTrigger};
-        } catch(ep) { result = {error:'Could not save: '+ep.toString()}; }
-      }
-    } else if (action === 'starlingGet') {
-      var sgToken = e.parameter.token || '';
-      var sgPath = e.parameter.path || '';
-      if (!sgToken) { result = {error:'No token',status:401}; }
-      else if (!sgPath) { result = {error:'No path'}; }
-      else {
-        try {
-          var sgResp = UrlFetchApp.fetch('https://api.starlingbank.com/api/v2'+sgPath, {headers:{'Authorization':'Bearer '+sgToken,'Accept':'application/json'},muteHttpExceptions:true});
-          var sgCode = sgResp.getResponseCode();
-          if (sgCode >= 200 && sgCode < 300) { result = JSON.parse(sgResp.getContentText()); }
-          else { result = {error:'HTTP '+sgCode,status:sgCode}; }
-        } catch(esg) { result = {error:'Proxy error: '+esg.toString()}; }
-      }
-    } else if (action === 'starlingPut') {
-      var spToken = e.parameter.token || '';
-      var spPath = e.parameter.path || '';
-      var spBody = e.parameter.body || '{}';
-      if (!spToken) { result = {error:'No token',status:401}; }
-      else if (!spPath) { result = {error:'No path'}; }
-      else {
-        try {
-          var spResp = UrlFetchApp.fetch('https://api.starlingbank.com/api/v2'+spPath, {method:'put',headers:{'Authorization':'Bearer '+spToken,'Content-Type':'application/json','Accept':'application/json'},payload:spBody,muteHttpExceptions:true});
-          var spCode = spResp.getResponseCode();
-          if (spCode >= 200 && spCode < 300) { result = {ok:true}; }
-          else { result = {ok:false,error:'HTTP '+spCode,status:spCode}; }
-        } catch(esp2) { result = {ok:false,error:'Proxy error: '+esp2.toString()}; }
-      }
-    } else if (action === 'starlingPost') {
-      var spostToken = e.parameter.token || '';
-      var spostPath = e.parameter.path || '';
-      var spostBody = e.parameter.body || '{}';
-      if (!spostToken) { result = {error:'No token',status:401}; }
-      else if (!spostPath) { result = {error:'No path'}; }
-      else {
-        try {
-          var spostResp = UrlFetchApp.fetch('https://api.starlingbank.com/api/v2'+spostPath, {method:'post',headers:{'Authorization':'Bearer '+spostToken,'Content-Type':'application/json','Accept':'application/json'},payload:spostBody,muteHttpExceptions:true});
-          var spostCode = spostResp.getResponseCode();
-          var spostText = spostResp.getContentText();
-          if (spostCode >= 200 && spostCode < 300) { result = spostText ? JSON.parse(spostText) : {ok:true}; }
-          else { result = {error:'HTTP '+spostCode, status:spostCode}; }
-        } catch(epost) { result = {error:'Proxy error: '+epost.toString()}; }
-      }
     } else {
       result = { error: 'unknown action' };
     }
@@ -2428,6 +1579,11 @@ function uploadReceiptImage(receipt) {
   var ext=mimeType==='application/pdf'?'pdf':'jpg';
   var fname=(receipt.description||'Receipt').replace(/[^a-zA-Z0-9 _-]/g,'')+'_'+(receipt.date||today())+'.'+ext;
   var blob=Utilities.newBlob(Utilities.base64Decode(b64),mimeType,fname);
+  // Dedup: if an identical file (same name AND same byte size) already exists in this folder, reuse it
+  // instead of creating a duplicate. Stops the "(1)", "(2)" pile-up of receipt images on repeated syncs.
+  var newSize=blob.getBytes().length;
+  var existing=folder.getFilesByName(fname);
+  while(existing.hasNext()){var ex=existing.next();try{if(ex.getSize()===newSize)return ex.getUrl();}catch(e){}}
   var file=folder.createFile(blob);
   file.setSharing(DriveApp.Access.ANYONE_WITH_LINK,DriveApp.Permission.VIEW);
   return file.getUrl();
@@ -2477,8 +1633,12 @@ function scanReceipts() {
           var ct = att.getContentType();
           if (ct.indexOf('image/') === 0 || ct === 'application/pdf') {
             var fname = att.getName() || ('receipt_' + dateStr + (ct === 'application/pdf' ? '.pdf' : '.jpg'));
-            var newFile = bizFolder.createFile(att.copyBlob().setName(fname));
-            newFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+            var attBlob = att.copyBlob().setName(fname);
+            var attSize = attBlob.getBytes().length;
+            // Dedup: reuse an existing identical attachment (same name AND size) instead of re-saving it
+            var newFile = null, exG = bizFolder.getFilesByName(fname);
+            while (exG.hasNext()) { var eg = exG.next(); try { if (eg.getSize() === attSize) { newFile = eg; break; } } catch(e) {} }
+            if (!newFile) { newFile = bizFolder.createFile(attBlob); newFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); }
             driveUrl = newFile.getUrl();
           }
         }
@@ -2673,74 +1833,7 @@ function fmtDate(d){return d.toLocaleDateString('en-GB',{day:'numeric',month:'sh
 function today(){return new Date().toISOString().split('T')[0];}
 function respond(data){return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(ContentService.MimeType.JSON);}
 
-// ── STARLING BACKGROUND SYNC ──────────────────────────────────────────────────
-// Runs every 30 minutes via a time trigger.
-// Setup: In the Apps Script editor, go to Project Settings > Script Properties,
-// add key STARLING_TOKEN with your Starling personal access token (needs read + write Spaces scopes).
-// Then run setupStarlingTrigger() once from the editor Run menu.
-function syncStarlingToSheet() {
-  var token = PropertiesService.getScriptProperties().getProperty('STARLING_TOKEN');
-  if (!token) { Logger.log('No STARLING_TOKEN in Script Properties.'); return; }
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var store = ss.getSheetByName('_app_data');
-  if (!store) { Logger.log('No _app_data sheet — open the app and sync first.'); return; }
-  var raw = store.getRange('A1').getValue();
-  if (!raw) return;
-  var data; try { data = JSON.parse(raw); } catch(e) { Logger.log('Parse error: '+e); return; }
-  var invoices = data.invoices || [];
-  var settings = data.settings || {};
-  var to = new Date(); var from = new Date(); from.setDate(from.getDate() - 90);
-  var accounts;
-  try {
-    var ar = UrlFetchApp.fetch('https://api.starlingbank.com/api/v2/accounts',
-      {headers:{'Authorization':'Bearer '+token,'Accept':'application/json'},muteHttpExceptions:true});
-    accounts = JSON.parse(ar.getContentText()).accounts || [];
-  } catch(e) { Logger.log('Starling accounts error: '+e); return; }
-  if (!accounts.length) return;
-  var inTxns = [];
-  accounts.forEach(function(acc) {
-    try {
-      var fr = UrlFetchApp.fetch(
-        'https://api.starlingbank.com/api/v2/feed/account/'+acc.accountUid+'/category/'+acc.defaultCategory+
-        '/between?minTransactionTimestamp='+encodeURIComponent(from.toISOString())+'&maxTransactionTimestamp='+encodeURIComponent(to.toISOString()),
-        {headers:{'Authorization':'Bearer '+token,'Accept':'application/json'},muteHttpExceptions:true});
-      (JSON.parse(fr.getContentText()).feedItems||[]).forEach(function(t){
-        if(t.status==='REVERSED'||t.direction!=='IN')return;
-        inTxns.push({id:t.feedItemUid,amount:(t.amount.minorUnits||0)/100,ref:t.reference||'',counterParty:t.counterPartyName||''});
-      });
-    } catch(e) {}
-  });
-  var changed=false; var nowMarked=[]; var usedIds={};
-  function normRef(s){return String(s||'').toUpperCase().replace(/[^A-Z0-9]/g,'');}
-  function markPaid(inv,match){usedIds[match.id]=true;inv.status='paid';inv.paidDate=new Date().toISOString();inv.starlingTxnId=match.id;inv.starlingRef=match.ref||match.counterParty;changed=true;nowMarked.push(inv);}
-  var unpaidInvs=invoices.filter(function(i){return i.status!=='paid';});
-  // Pass 1: payment reference contains the invoice number (survives rounded/partial amounts)
-  unpaidInvs.forEach(function(inv){
-    var num=normRef(inv.invoiceNum); if(num.length<4)return;
-    var match=inTxns.find(function(t){return !usedIds[t.id]&&normRef(t.ref).indexOf(num)>=0;});
-    if(match){markPaid(inv,match);Logger.log('Ref match: '+inv.invoiceNum);}
-  });
-  // Pass 2: amount within 2p
-  unpaidInvs.forEach(function(inv){
-    if(inv.status==='paid')return;
-    var match=inTxns.find(function(t){return !usedIds[t.id]&&Math.abs(t.amount-(inv.subtotal||0))<0.02;});
-    if(match){markPaid(inv,match);Logger.log('Amount match: '+inv.invoiceNum+' £'+match.amount);}
-  });
-  if(changed){
-    data.invoices=invoices;
-    store.getRange('A1').setValue(JSON.stringify(data));
-    buildInvoicesSheet(ss,invoices);
-    try {
-      var email=settings.email||Session.getActiveUser().getEmail();
-      if(email&&nowMarked.length){MailApp.sendEmail(email,'💸 '+nowMarked.length+' invoice'+( nowMarked.length>1?'s':'')+' matched paid via Starling',nowMarked.map(function(i){return i.invoiceNum+' — £'+(i.subtotal||0).toFixed(2)+' from '+(i.starlingRef||'Starling');}).join('\\n')+'\\n\\nMarked automatically by the background Starling sync. NOTE: no tax/holiday was moved to your Spaces — open the app → Invoices tab and use "Paid but not potted" to pot it.');}
-    } catch(e){}
-  }
-}
-function setupStarlingTrigger(){
-  ScriptApp.getProjectTriggers().forEach(function(t){if(t.getHandlerFunction()==='syncStarlingToSheet')ScriptApp.deleteTrigger(t);});
-  ScriptApp.newTrigger('syncStarlingToSheet').timeBased().everyMinutes(30).create();
-  Logger.log('Starling sync trigger created — runs every 30 minutes.');
-}`;
+`;
 
 // ── TIPS ─────────────────────────────────────────────────────────────────────
 function TipsView(){
@@ -2866,124 +1959,17 @@ return(<Page>
 <div style={{fontSize:10,color:T.textFaint,fontStyle:'italic',textAlign:'center',marginTop:20,padding:'0 10px',lineHeight:1.6}}>None of this is professional tax advice. Tax rules change yearly. For anything significant, talk to a qualified accountant. They usually pay for themselves.</div>
 </Page>);}
 
-// ── TAX SAVINGS CARD ─────────────────────────────────────────────────────────
+// ── SET-ASIDE RATES CARD ──
 function TaxSavingsCard({settings,set}){
-const[spaces,setSpaces]=useState([]);const[fetching,setFetching]=useState(false);const[fetchErr,setFetchErr]=useState(null);
-const fetchSpaces=async()=>{
-  if(!settings.starlingToken)return;
-  setFetching(true);setFetchErr(null);
-  try{
-    let goals=[],accountUid=null;
-    if(settings.sheetsUrl&&!settings.starlingSandbox){
-      // Route through Apps Script to avoid CORS
-      Sheets.init(settings.sheetsUrl);
-      const d=await Sheets._jsonp(settings.sheetsUrl+'?action=fetchStarlingSpaces&token='+encodeURIComponent(settings.starlingToken),15000);
-      if(d?.error)throw new Error(d.error);
-      goals=d?.goals||[];
-      accountUid=d?.accountUid||null;
-    }else{
-      // Direct call (may fail on CORS)
-      Starling.init(settings.starlingToken,settings.starlingSandbox);
-      const r=await Starling.getSavingsGoals();
-      goals=r.goals||[];accountUid=r.accountUid;
-    }
-    setFetching(false);
-    if(!goals.length){setFetchErr('No Spaces found — create a Savings Space in the Starling app first.');return;}
-    setSpaces(goals);
-    if(accountUid)set('starlingAccountUid',accountUid);
-  }catch(e){
-    setFetching(false);
-    setFetchErr(e.message||'Failed to fetch Spaces.');
-  }
-};
-const SpacePicker=({uidKey,nameKey,color})=>(
-  spaces.length>0?(
-    <Sel value={settings[uidKey]||''} onChange={e=>{const g=spaces.find(s=>s.savingsGoalUid===e.target.value);set(uidKey,e.target.value);set(nameKey,g?.name||'');}}>
-      <option value="">— pick a Space —</option>
-      {spaces.map(g=><option key={g.savingsGoalUid} value={g.savingsGoalUid}>{g.name}</option>)}
-    </Sel>
-  ):(
-    <div style={{display:'flex',gap:8}}>
-      <Inp placeholder={settings[nameKey]||'Paste Space UID or fetch below'} value={settings[uidKey]||''} onChange={e=>set(uidKey,e.target.value)} style={{flex:1,fontSize:12}}/>
-      {settings.starlingToken&&(<button onClick={fetchSpaces} disabled={fetching} style={{background:color+'18',border:`1.5px solid ${color}44`,borderRadius:12,padding:'0 14px',color,fontWeight:700,fontSize:12,flexShrink:0,opacity:fetching?0.5:1}}>{fetching?'…':'Fetch'}</button>)}
-    </div>
-  )
-);
 const taxPct=parseFloat(settings.taxPercent??20);
 const holPct=parseFloat(settings.holidayPayPercent??12.07);
 const ex=500;
 return(<Card style={{marginBottom:16,border:`1px solid ${T.lumpGreen}30`}}>
-  <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}><span style={{fontSize:20}}>🏦</span><div style={{fontWeight:700,fontSize:14,flex:1}}>Savings pots</div></div>
-  <div style={{fontSize:12,color:T.textMuted,lineHeight:1.6,marginBottom:10}}>When you mark an invoice paid, the app prompts to set aside your tax and holiday amounts. On a £{ex} invoice: <strong style={{color:T.lumpGreen}}>£{(ex*taxPct/100).toFixed(2)}</strong> tax + <strong style={{color:T.timed}}>£{(ex*holPct/100).toFixed(2)}</strong> holiday = <strong style={{color:T.text}}>£{(ex*(taxPct+holPct)/100).toFixed(2)}</strong>.</div>
-  <div style={{fontSize:11,color:T.timed,background:T.timed+'10',border:`1px solid ${T.timed}30`,borderRadius:8,padding:'8px 10px',marginBottom:12,lineHeight:1.6}}>⚠ Starling Spaces earn <strong>no interest</strong>. If you use a Monzo savings pot or Starling Easy Saver for tax savings, use Track Only mode below — the app records the amounts without touching your Spaces.</div>
-  <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:14,background:T.surface,border:`1px solid ${T.border}`,borderRadius:10,padding:'10px 12px'}}>
-    <div style={{flex:1}}>
-      <div style={{fontSize:13,fontWeight:700}}>Track only (no auto-transfer)</div>
-      <div style={{fontSize:11,color:T.textMuted,lineHeight:1.5,marginTop:2}}>App shows what to move — you move it manually in your banking app to wherever earns interest.</div>
-    </div>
-    <input type="checkbox" checked={!!settings.starlingPotsTrackOnly} onChange={e=>set('starlingPotsTrackOnly',e.target.checked)} style={{width:20,height:20,accentColor:T.timed,flexShrink:0,cursor:'pointer'}}/>
-  </div>
-
-  <div style={{fontSize:11,fontWeight:700,color:T.lumpGreen,letterSpacing:1,textTransform:'uppercase',marginBottom:10}}>Tax pot</div>
-  <Field label="Tax percentage (%)">
-    <Inp type="number" min="0" max="100" step="1" value={settings.taxPercent??20} onChange={e=>{const v=e.target.value.replace(/[^\d.]/g,'');set('taxPercent',v===''?'':parseFloat(v)||0);}}/>
-  </Field>
-  <Field label="Tax Space"><SpacePicker uidKey="starlingTaxSpaceUid" nameKey="starlingTaxSpaceName" color={T.lumpGreen}/></Field>
-  {settings.starlingTaxSpaceUid&&settings.starlingTaxSpaceName&&<div style={{fontSize:11,color:T.lumpGreen,display:'flex',alignItems:'center',gap:5,marginBottom:10}}><I n="check" sz={12} c={T.lumpGreen}/> {settings.starlingTaxSpaceName}</div>}
-
-  <Hr/>
-  <div style={{fontSize:11,fontWeight:700,color:T.timed,letterSpacing:1,textTransform:'uppercase',marginBottom:4,marginTop:4}}>Holiday pay pot <span style={{fontWeight:400,color:T.textMuted,textTransform:'none',letterSpacing:0}}>(optional)</span></div>
-  <div style={{fontSize:12,color:T.textMuted,lineHeight:1.5,marginBottom:10}}>As a freelancer you don't get paid holiday. Setting aside 12.07% per invoice (the statutory rate — 5.6 weeks out of 46.4) means you can take time off without worrying.</div>
-  <Field label="Holiday pay percentage (%)">
-    <Inp type="number" min="0" max="100" step="0.01" value={settings.holidayPayPercent??12.07} onChange={e=>{const v=e.target.value.replace(/[^\d.]/g,'');set('holidayPayPercent',v===''?'':parseFloat(v)||0);}}/>
-  </Field>
-  <Field label="Holiday Space"><SpacePicker uidKey="starlingHolidaySpaceUid" nameKey="starlingHolidaySpaceName" color={T.timed}/></Field>
-  {settings.starlingHolidaySpaceUid&&settings.starlingHolidaySpaceName&&<div style={{fontSize:11,color:T.timed,display:'flex',alignItems:'center',gap:5,marginBottom:4}}><I n="check" sz={12} c={T.timed}/> {settings.starlingHolidaySpaceName}</div>}
-
-  {fetchErr&&<div style={{fontSize:12,color:T.danger,marginTop:6,lineHeight:1.5}}>{fetchErr}</div>}
-  {!settings.starlingToken&&<div style={{fontSize:11,color:T.textMuted,marginTop:8}}>Add your Starling token above to fetch Spaces automatically.</div>}
-
-  <Hr/>
-  <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1,textTransform:'uppercase',marginBottom:4,marginTop:4}}>Or: send to savings account (earns interest)</div>
-  <div style={{fontSize:12,color:T.textMuted,lineHeight:1.5,marginBottom:10}}>If configured, the app sends a real Faster Payment to your savings account (Easy Saver, etc.) instead of moving money to a Space. Requires <code style={{fontSize:11,background:'#eceadf',padding:'1px 5px',borderRadius:4}}>pay-local:create</code> on your token.</div>
-  {(()=>{
-    const[savAccs,setSavAccs]=useState([]);const[savFetching,setSavFetching]=useState(false);const[savErr,setSavErr]=useState(null);
-    const fetchSavingsAccounts=async()=>{
-      setSavFetching(true);setSavErr(null);
-      try{
-        Starling.init(settings.starlingToken,settings.starlingSandbox);
-        const accs=await Starling.getAccounts();
-        const nonPrimary=(accs?.accounts||[]).filter(a=>a.accountType&&a.accountType!=='PRIMARY');
-        if(!nonPrimary.length){setSavErr('No savings accounts found. Make sure you have an Easy Saver account open in Starling.');setSavFetching(false);return;}
-        const withIds=await Promise.all(nonPrimary.map(async a=>{
-          try{const ids=await Starling.getAccountIdentifiers(a.accountUid);const sc=ids?.accountIdentifiers?.find(i=>i.identifierType==='SORT_CODE_ACCOUNT_NUMBER');return{uid:a.accountUid,name:a.name||a.accountType,sortCode:sc?.bankIdentifier||'',accountNumber:sc?.accountIdentifier||'',category:a.defaultCategory};}
-          catch{return null;}
-        }));
-        setSavAccs(withIds.filter(Boolean));
-      }catch(e){setSavErr(e.message||'Failed to fetch accounts');}
-      setSavFetching(false);
-    };
-    const SavPicker=({uidKey,scKey,anKey,nameKey,color})=>(
-      savAccs.length>0?(
-        <Sel value={settings[uidKey]||''} onChange={e=>{const a=savAccs.find(x=>x.uid===e.target.value);set(uidKey,e.target.value);set(scKey,a?.sortCode||'');set(anKey,a?.accountNumber||'');set(nameKey,a?.name||'');}}>
-          <option value="">— pick savings account —</option>
-          {savAccs.map(a=><option key={a.uid} value={a.uid}>{a.name} ({a.sortCode} {a.accountNumber})</option>)}
-        </Sel>
-      ):(
-        <div style={{fontSize:12,color:T.textMuted}}>Click Fetch below to load your savings accounts.</div>
-      )
-    );
-    return(<>
-      {settings.starlingToken&&<button onClick={fetchSavingsAccounts} disabled={savFetching} style={{background:T.accent+'18',border:`1.5px solid ${T.accent}44`,borderRadius:12,padding:'8px 14px',color:T.accent,fontWeight:700,fontSize:12,marginBottom:12,cursor:'pointer',opacity:savFetching?0.5:1}}>{savFetching?'Fetching…':'Fetch savings accounts'}</button>}
-      {savErr&&<div style={{fontSize:12,color:T.danger,marginBottom:10}}>{savErr}</div>}
-      <Field label="Tax → savings account"><SavPicker uidKey="starlingTaxSavingsUid" scKey="starlingTaxSavingsSortCode" anKey="starlingTaxSavingsAccountNumber" nameKey="starlingTaxSavingsName" color={T.lumpGreen}/></Field>
-      {settings.starlingTaxSavingsUid&&<div style={{fontSize:11,color:T.lumpGreen,display:'flex',alignItems:'center',gap:5,marginBottom:8}}><I n="check" sz={12} c={T.lumpGreen}/> {settings.starlingTaxSavingsName} · overrides Tax Space above</div>}
-      {settings.starlingTaxSavingsUid&&<button onClick={()=>{set('starlingTaxSavingsUid','');set('starlingTaxSavingsSortCode','');set('starlingTaxSavingsAccountNumber','');set('starlingTaxSavingsName','');}} style={{fontSize:11,color:T.danger,background:'none',border:'none',padding:0,cursor:'pointer',marginBottom:8}}>× Clear (use Space instead)</button>}
-      <Field label="Holiday → savings account"><SavPicker uidKey="starlingHolidaySavingsUid" scKey="starlingHolidaySavingsSortCode" anKey="starlingHolidaySavingsAccountNumber" nameKey="starlingHolidaySavingsName" color={T.timed}/></Field>
-      {settings.starlingHolidaySavingsUid&&<div style={{fontSize:11,color:T.timed,display:'flex',alignItems:'center',gap:5,marginBottom:8}}><I n="check" sz={12} c={T.timed}/> {settings.starlingHolidaySavingsName} · overrides Holiday Space above</div>}
-      {settings.starlingHolidaySavingsUid&&<button onClick={()=>{set('starlingHolidaySavingsUid','');set('starlingHolidaySavingsSortCode','');set('starlingHolidaySavingsAccountNumber','');set('starlingHolidaySavingsName','');}} style={{fontSize:11,color:T.danger,background:'none',border:'none',padding:0,cursor:'pointer',marginBottom:4}}>× Clear (use Space instead)</button>}
-    </>);
-  })()}
+  <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}><I n="money" sz={18} c={T.lumpGreen}/><div style={{fontWeight:700,fontSize:14,flex:1}}>Set-aside rates</div></div>
+  <div style={{fontSize:12,color:T.textMuted,lineHeight:1.6,marginBottom:12}}>How much to put aside each time you're paid. On a £{ex} payment: <strong style={{color:T.lumpGreen}}>£{(ex*taxPct/100).toFixed(2)}</strong> tax + <strong style={{color:T.timed}}>£{(ex*holPct/100).toFixed(2)}</strong> holiday.</div>
+  <Field label="Tax percentage (%)"><Inp type="number" min="0" max="100" step="1" value={settings.taxPercent??20} onChange={e=>{const v=e.target.value.replace(/[^\d.]/g,'');set('taxPercent',v===''?'':parseFloat(v)||0);}}/></Field>
+  <Field label="Holiday pay percentage (%)"><Inp type="number" min="0" max="100" step="0.01" value={settings.holidayPayPercent??12.07} onChange={e=>{const v=e.target.value.replace(/[^\d.]/g,'');set('holidayPayPercent',v===''?'':parseFloat(v)||0);}}/></Field>
+  <div style={{fontSize:11,color:T.textMuted,lineHeight:1.5,marginTop:4}}>Freelancers don't get paid holiday — putting aside 12.07% (the statutory rate) means you can take time off without the income gap.</div>
 </Card>);}
 
 // ── TRANSFER FROM OLD APP ────────────────────────────────────────────────────
@@ -3025,7 +2011,7 @@ return(<Card style={{marginBottom:20,border:`1.5px solid ${T.accent}44`}}>
   {result?(
     <div style={{background:T.lumpGreen+'10',border:`1px solid ${T.lumpGreen}44`,borderRadius:12,padding:'12px 14px'}}>
       <div style={{fontWeight:700,fontSize:13,color:T.lumpGreen,marginBottom:6}}>✓ Transfer complete</div>
-      <div style={{fontSize:12,color:T.textMuted,lineHeight:1.7}}>Imported {result.invoices} invoice{result.invoices!==1?'s':''}, {result.entries} income entr{result.entries!==1?'ies':'y'}, {result.receipts} receipt{result.receipts!==1?'s':''} and {result.clients} client{result.clients!==1?'s':''}.{result.settings?' Your settings (Starling token, Spaces, rates) came across too.':''} Your old app and its spreadsheet are untouched. Tap Sync on the Invoices tab to match everything against Starling.</div>
+      <div style={{fontSize:12,color:T.textMuted,lineHeight:1.7}}>Imported {result.invoices} invoice{result.invoices!==1?'s':''}, {result.entries} income entr{result.entries!==1?'ies':'y'}, {result.receipts} receipt{result.receipts!==1?'s':''} and {result.clients} client{result.clients!==1?'s':''}.{result.settings?' Your settings and rates came across too.':''} Your old app and its spreadsheet are untouched.</div>
     </div>
   ):(<>
     <div style={{fontSize:12,color:T.textMuted,lineHeight:1.6,marginBottom:12}}>One-tap copy of your old app's data into Honey. <strong style={{color:T.text}}>Read-only</strong> — nothing in the old app or its spreadsheet is changed, so it stays as your archive.</div>
@@ -3070,24 +2056,11 @@ const[syncResult,setSyncResult]=useState(null);
 const[clientForm,setClientForm]=useState({name:'',email:'',address:''});
 const[clientFlash,setClientFlash]=useState(false);
 const[confClientId,setConfClientId]=useState(null);
-const[savingStarlingToken,setSavingStarlingToken]=useState(false);
-const[saveStarlingResult,setSaveStarlingResult]=useState(null);
 const setCF=(k,v)=>setClientForm(f=>({...f,[k]:v}));
 const handleAddClient=()=>{if(!clientForm.name)return;onAddClient({name:clientForm.name,email:clientForm.email||'',address:clientForm.address||''});setClientFlash(true);setClientForm({name:'',email:'',address:''});setTimeout(()=>setClientFlash(false),1600);};
 const copyCode=()=>{navigator.clipboard.writeText(GAS).then(()=>{setCopied(true);setTimeout(()=>setCopied(false),2200);});};
 const runTest=async()=>{setTesting(true);setTestMsg(null);const res=await onTest();setTestMsg(res);setTesting(false);};
 const handleSync=async()=>{setSyncing(true);setSyncResult(null);const ok=await onSyncFromSheets();setSyncing(false);setSyncResult(ok?'ok':'err');setTimeout(()=>setSyncResult(null),3000);};
-const handleSaveStarlingToken=async()=>{
-  if(!settings.starlingToken||!settings.sheetsUrl||savingStarlingToken)return;
-  setSavingStarlingToken(true);setSaveStarlingResult(null);
-  try{
-    Sheets.init(settings.sheetsUrl);
-    const d=await Sheets._jsonp(settings.sheetsUrl+'?action=saveStarlingToken&token='+encodeURIComponent(settings.starlingToken),15000);
-    if(d?.ok){setSaveStarlingResult('ok');}else{setSaveStarlingResult('err:'+(d?.error||'Failed — check Apps Script is up to date (v5)'));}
-  }catch(e){setSaveStarlingResult('err:'+(e.message||'Timed out'));}
-  setSavingStarlingToken(false);
-  setTimeout(()=>setSaveStarlingResult(null),5000);
-};
 return(<Page>
 <div style={{fontFamily:'Space Mono,monospace',fontSize:18,fontWeight:700,marginBottom:22}}>Settings</div>
 <ImportCard onImportOld={onImportOld}/>
@@ -3119,7 +2092,7 @@ return(<Page>
   <div style={{fontSize:11,color:T.textMuted,lineHeight:1.5,marginBottom:10}}>After deleting rows in the spreadsheet, use the sheet menu <strong style={{color:T.text}}>Honey → Pull deletions</strong> first, then tap Pull above to sync to this app.</div>
   <button onClick={()=>setShowSetup(s=>!s)} style={{background:'none',border:'none',color:T.accent,fontSize:12,fontWeight:700,padding:0}}>{showSetup?'▲ Hide':'▼ Show'} setup instructions</button>
   {showSetup&&<div style={{marginTop:16}}>
-    {[['1','Go to sheets.new and create a new Google Sheet'],['2','Extensions → Apps Script'],['3','Delete all existing code, paste the code below, Save (Ctrl+S)'],['4','Click Deploy → New deployment → Web app'],['5','Execute as: Me — Who has access: Anyone  (NOT \'Anyone with Google account\' — this is the most common mistake)'],['6','Click Deploy — authorise all permissions (Drive, Docs, Sheets, Gmail)'],['7','Copy the /exec URL and paste it above'],['8','Test the connection'],['9','Open the sheet and run Honey → Install auto-sync trigger (once)'],['10','To import Gmail receipts: label emails "Tracker/Receipts" in Gmail, then tap Import from Gmail in the Receipts tab. Processed emails get labelled Tracker/Processed automatically.'],['11','(Optional) Zero-touch Starling sync: add your Starling token in Settings → Starling Bank, then tap "Enable background auto-sync via Sheets". This saves the token to Script Properties and starts the 30-min trigger automatically. Invoices auto-mark paid with an email notification.']].map(([n,t])=>(<div key={n} style={{display:'flex',gap:10,marginBottom:9,alignItems:'flex-start'}}><div style={{width:20,height:20,borderRadius:'50%',background:T.accent+'20',border:`1px solid ${T.accent}40`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,fontWeight:700,color:T.accent,flexShrink:0,marginTop:1}}>{n}</div><div style={{fontSize:12,color:T.textMuted,lineHeight:1.55}}>{t}</div></div>))}
+    {[['1','Go to sheets.new and create a new Google Sheet'],['2','Extensions → Apps Script'],['3','Delete all existing code, paste the code below, Save (Ctrl+S)'],['4','Click Deploy → New deployment → Web app'],['5','Execute as: Me — Who has access: Anyone  (NOT \'Anyone with Google account\' — this is the most common mistake)'],['6','Click Deploy — authorise all permissions (Drive, Docs, Sheets, Gmail)'],['7','Copy the /exec URL and paste it above'],['8','Test the connection'],['9','Open the sheet and run Honey → Install auto-sync trigger (once)'],['10','To import Gmail receipts: label emails "Tracker/Receipts" in Gmail, then tap Import from Gmail in the Receipts tab. Processed emails get labelled Tracker/Processed automatically.']].map(([n,t])=>(<div key={n} style={{display:'flex',gap:10,marginBottom:9,alignItems:'flex-start'}}><div style={{width:20,height:20,borderRadius:'50%',background:T.accent+'20',border:`1px solid ${T.accent}40`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,fontWeight:700,color:T.accent,flexShrink:0,marginTop:1}}>{n}</div><div style={{fontSize:12,color:T.textMuted,lineHeight:1.55}}>{t}</div></div>))}
     <div style={{background:'#ece9dd',borderRadius:12,padding:'12px 14px',marginTop:12,border:`1px solid ${T.border}`}}>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}><span style={{fontSize:10,color:T.textMuted,fontWeight:700,letterSpacing:1}}>APPS SCRIPT CODE (v5 — Gmail + PDF support)</span><button onClick={copyCode} style={{background:copied?T.lumpGreen+'20':'transparent',border:`1px solid ${copied?T.lumpGreen:T.border}`,borderRadius:7,padding:'4px 10px',fontSize:11,fontWeight:700,color:copied?T.lumpGreen:T.textMuted,cursor:'pointer'}}>{copied?'✓ Copied':'Copy'}</button></div>
       <pre style={{fontSize:9,color:'#6a6080',lineHeight:1.6,maxHeight:220,overflowY:'auto'}}>{GAS}</pre>
@@ -3132,28 +2105,8 @@ return(<Page>
 <Field label="Email"><Inp type="email" placeholder="your@email.com" value={settings.email||''} onChange={e=>set('email',e.target.value)}/></Field>
 <Hr/>
 <Card style={{marginBottom:16,border:`1px solid ${T.accentBright}30`}}>
-  <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}><I n="scan" sz={17} c={T.accentBright}/><div style={{fontWeight:700,fontSize:14,flex:1}}>AI Scan Key <span style={{fontWeight:400,fontSize:12,color:T.textMuted}}>(optional)</span></div></div>
-  <div style={{fontSize:12,color:T.textMuted,lineHeight:1.6,marginBottom:10}}>Receipt scanning is <strong style={{color:T.text}}>free by default</strong> using on-device OCR. Adding an Anthropic key unlocks smarter AI scanning (better accuracy, handles messy receipts) and PDF scanning. Uses Claude Haiku — about £0.002 per scan. Get a key at <span style={{color:T.accentBright}}>console.anthropic.com</span>.</div>
-  <Field label="Anthropic API Key"><Inp type="password" placeholder="sk-ant-…" value={settings.anthropicKey||''} onChange={e=>set('anthropicKey',e.target.value)}/></Field>
-  {settings.anthropicKey&&<div style={{fontSize:11,color:T.lumpGreen,display:'flex',alignItems:'center',gap:5,marginTop:-6}}><I n="check" sz={12} c={T.lumpGreen}/> AI Scan enabled — look for the ✦ button when adding receipts</div>}
-</Card>
-<Card style={{marginBottom:16,border:`1px solid ${T.timed}30`}}>
-  <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}><span style={{fontSize:20}}>🏦</span><div style={{fontWeight:700,fontSize:14,flex:1}}>Starling Bank <span style={{fontWeight:400,fontSize:12,color:T.textMuted}}>(optional)</span></div></div>
-  <div style={{fontSize:12,color:T.textMuted,lineHeight:1.6,marginBottom:10}}>Connect your Starling account to auto-match payments to invoices and link transactions to receipts. Matching checks the payment reference for your invoice number first (ask clients to include it — it's printed on every invoice), then falls back to exact amount. Matching only reads your feed; the savings-pot feature additionally moves money between your account and your own Spaces (never out of your account).</div>
-  <div style={{fontSize:12,color:T.textMuted,lineHeight:1.6,marginBottom:12}}>To get a token: open <strong style={{color:T.text}}>developer.starlingbank.com</strong> → Personal access tokens → Create token, and tick these scopes: <strong style={{color:T.text}}>account:read, balance:read, transaction:read, space:read, savings-goal:read</strong> — plus <strong style={{color:T.lumpGreen}}>savings-goal-transfer:create</strong> if you use the tax/holiday pots below. Without that last write scope, pot transfers will fail.</div>
-  <Field label="Personal access token"><Inp type="password" placeholder="eyJhbGci…" value={settings.starlingToken||''} onChange={e=>set('starlingToken',e.target.value)}/></Field>
-  <label style={{display:'flex',alignItems:'center',gap:8,fontSize:12,color:T.textMuted,marginBottom:10,cursor:'pointer'}}>
-    <input type="checkbox" checked={!!settings.starlingSandbox} onChange={e=>set('starlingSandbox',e.target.checked)} style={{accentColor:T.timed}}/>
-    <span><strong style={{color:T.timed}}>Sandbox test mode</strong> — use Starling's test environment (api-sandbox.starlingbank.com) with fake money. Needs a sandbox token from the developer portal's Sandbox tab.</span>
-  </label>
-  {settings.starlingSandbox&&<div style={{fontSize:11,color:T.timed,background:T.timed+'12',border:`1px solid ${T.timed}44`,borderRadius:8,padding:'7px 10px',marginBottom:10,lineHeight:1.5}}>⚠ Sandbox mode is ON — all Starling calls hit the test environment. No real money moves. Turn this off (and paste your real token) before live use.</div>}
-  {settings.starlingToken&&<div style={{fontSize:11,color:T.lumpGreen,display:'flex',alignItems:'center',gap:5,marginTop:-6,marginBottom:10}}><I n="check" sz={12} c={T.lumpGreen}/> Starling connected — use Sync on invoices, Link on receipts</div>}
-  {settings.starlingToken&&settings.sheetsUrl&&(
-    <button onClick={handleSaveStarlingToken} disabled={savingStarlingToken} style={{width:'100%',background:saveStarlingResult==='ok'?T.lumpGreen+'18':T.timed+'12',border:`1.5px solid ${saveStarlingResult==='ok'?T.lumpGreen+'44':T.timed+'44'}`,borderRadius:12,padding:'10px 14px',color:saveStarlingResult==='ok'?T.lumpGreen:T.timed,fontWeight:700,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',gap:8,cursor:'pointer',opacity:savingStarlingToken?0.6:1}}>
-      {savingStarlingToken?<><Spinner/> Saving to Scripts…</>:saveStarlingResult==='ok'?<><I n="check" sz={14} c={T.lumpGreen}/> Saved! Background sync active (every 30 min)</>:<><I n="sync" sz={14} c={T.timed}/> Enable background auto-sync via Sheets</>}
-    </button>
-  )}
-  {saveStarlingResult&&saveStarlingResult.startsWith('err:')&&<div style={{fontSize:11,color:T.danger,marginTop:6,lineHeight:1.5,background:T.dangerBg,borderRadius:8,padding:'7px 10px'}}>{saveStarlingResult.replace('err:','')}</div>}
+  <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}><I n="scan" sz={17} c={T.accentBright}/><div style={{fontWeight:700,fontSize:14,flex:1}}>AI Scan</div></div>
+  <div style={{fontSize:12,color:T.lumpGreen,display:'flex',alignItems:'center',gap:5}}><I n="check" sz={12} c={T.lumpGreen}/> AI Scan enabled — look for the ✦ button when adding receipts</div>
 </Card>
 <TaxSavingsCard settings={settings} set={set}/>
 <Hr/>
@@ -3213,7 +2166,7 @@ return(<Page>
 
 // ── NAV ──────────────────────────────────────────────────────────────────────
 function Nav({view,setView,onSnap}){
-const tabs=[['home','home','Home'],['feed','sync','Bank'],['log','list','Log'],['receipts','receipt','Receipts'],['invoice','invoice','Invoice'],['reports','chart','Reports'],['snap','camera','Snap'],['settings','settings','More']];
+const tabs=[['home','home','Home'],['log','list','Log'],['invoice','invoice','Invoice'],['receipts','receipt','Receipts'],['snap','camera','Snap']];
 return(<div style={{position:'fixed',bottom:0,left:'50%',transform:'translateX(-50%)',width:'100%',maxWidth:480,background:T.surface,borderTop:`1px solid ${T.border}`,display:'grid',gridTemplateColumns:`repeat(${tabs.length},1fr)`,zIndex:100}}>{tabs.map(([id,icon,label])=>{const a=view===id;return <button key={id} onClick={()=>id==='snap'?onSnap():setView(id)} style={{background:'none',border:'none',padding:'9px 1px 7px',display:'flex',flexDirection:'column',alignItems:'center',gap:2,color:a?T.accent:T.textMuted}}><I n={icon} sz={18} c={a?T.accent:T.textMuted}/><span style={{fontSize:9,fontWeight:700}}>{label}</span></button>;})}</div>);}
 
 // ── APP ──────────────────────────────────────────────────────────────────────
@@ -3233,15 +2186,13 @@ const[clients,setClients]=useState([]);
 const[trash,setTrash]=useState(()=>{const t=LS.get('mhq-trash')||[];const cut=Date.now()-30*86400000;return t.filter(x=>x.deletedAt&&new Date(x.deletedAt).getTime()>cut);});
 useEffect(()=>{LS.set('mhq-trash',trash);},[trash]);
 const TRASH_MS=30*86400000;
-const[settings,setSettings]=useState({name:'',business:'',email:'',bankDetails:'',defaultRate:35,sheetsUrl:'',payRef:'PAYMENT REF: PTF',invoiceCounter:1,anthropicKey:'',starlingToken:'',taxPercent:20,starlingTaxSpaceUid:'',starlingTaxSpaceName:'',starlingAccountUid:'',starlingDefaultCategoryUid:'',holidayPayPercent:12.07,starlingHolidaySpaceUid:'',starlingHolidaySpaceName:'',starlingPotsTrackOnly:false,starlingTaxSavingsUid:'',starlingTaxSavingsSortCode:'',starlingTaxSavingsAccountNumber:'',starlingTaxSavingsName:'',starlingHolidaySavingsUid:'',starlingHolidaySavingsSortCode:'',starlingHolidaySavingsAccountNumber:'',starlingHolidaySavingsName:''});
+const[settings,setSettings]=useState({name:'',business:'',email:'',bankDetails:'',defaultRate:35,sheetsUrl:'',payRef:'PAYMENT REF: PTF',invoiceCounter:1,anthropicKey:'',taxPercent:20,holidayPayPercent:12.07});
 const[syncStatus,setSyncStatus]=useState('loading');
 const[loaded,setLoaded]=useState(false);
 const[booted,setBooted]=useState(false);
 const syncTimer=useRef(null);
 const pollTimer=useRef(null);
 const[lastSynced,setLastSynced]=useState(null);
-const[starlingQueue,setStarlingQueue]=useState({matches:[],unmatched:[],lastSync:null});
-const[pendingFeedTxn,setPendingFeedTxn]=useState(null); // {txn, mode:'invoice'|'log'}
 const isSaving=useRef(false);
 const sheetHydrated=useRef(false); // true once we've successfully READ the sheet — guards against empty-state overwrite
 const[aligning,setAligning]=useState(false);
@@ -3318,30 +2269,6 @@ useEffect(()=>{
   return()=>clearInterval(pollTimer.current);
 },[loaded,settings.sheetsUrl]);
 
-// Bust the feed cache whenever the token changes so stale empty results don't linger
-useEffect(()=>{LS.set('mhq-starling-cache',null);},[settings.starlingToken]);
-// Auto-sync Starling silently on app open (10-min cache so reopening is instant)
-useEffect(()=>{
-  if(!loaded||!settings.starlingToken)return;
-  (async()=>{
-    let txns=null;
-    const cache=LS.get('mhq-starling-cache');
-    if(cache&&cache.sandbox===!!settings.starlingSandbox&&Date.now()-(cache.t||0)<10*60000)txns=cache.txns;
-    if(!txns){
-      Starling.init(settings.starlingToken,settings.starlingSandbox,settings.sheetsUrl);
-      txns=await Starling.fetchRecent(90).catch(()=>null);
-      if(txns)LS.set('mhq-starling-cache',{t:Date.now(),sandbox:!!settings.starlingSandbox,txns});
-    }
-    if(!txns)return;
-    const inTxns=txns.filter(t=>t.direction==='IN');
-    const unpaid=invoices.filter(i=>i.status!=='paid');
-    const{matches,usedTxnIds}=matchInvoicesToTxns(inTxns,unpaid);
-    const pottedIds=new Set([...invoices.filter(i=>i.starlingTxnId).map(i=>i.starlingTxnId),...receipts.filter(r=>r.starlingTxnId).map(r=>r.starlingTxnId),...[...usedTxnIds]]);
-    const unmatched=inTxns.filter(t=>!pottedIds.has(t.id)&&t.amount>0);
-    setStarlingQueue({matches,unmatched,lastSync:new Date()});
-  })();
-},[loaded]);
-
 const syncFromSheets=async()=>{
   if(!settings.sheetsUrl)return false;
   Sheets.init(settings.sheetsUrl);setSyncStatus('loading');
@@ -3355,59 +2282,6 @@ const syncFromSheets=async()=>{
     sheetHydrated.current=true;
     setSyncStatus('synced');setLastSynced(new Date());return true;
   }else{setSyncStatus('error');return false;}
-};
-
-// ── One-tap reconciliation: pull the Sheet backup, re-read 90 days of Starling, line everything up ──
-const alignEverything=async()=>{
-  if(aligning)return;
-  setAligning(true);setAlignResult(null);
-  const result={matched:0,uninvoiced:0,untagged:0,restored:false,balance:false,err:null};
-  // current data after a possible Sheet restore (state updates are async, so track locally)
-  let curEntries=entries,curReceipts=receipts,curInvoices=invoices;
-  try{
-    // 1) Pull the Google Sheet backup first (non-destructive restore of anything missing locally)
-    if(settings.sheetsUrl){
-      try{
-        Sheets.init(settings.sheetsUrl);
-        const sd=await Sheets.load();
-        if(sd&&Array.isArray(sd.entries)){
-          const lr=LS.get('mhq-receipts')||[];
-          const merged=(sd.receipts||[]).map(r=>{const l=lr.find(x=>x.id===r.id);return l?.imageData?{...r,imageData:l.imageData}:r;});
-          curEntries=sd.entries||[];curReceipts=merged;curInvoices=sd.invoices||[];
-          setEntries(curEntries);setReceipts(merged);setInvoices(curInvoices);
-          if(sd.clients)setClients(sd.clients);
-          if(sd.settings)setSettings(s=>({...s,...sd.settings}));
-          setLastSynced(new Date());setSyncStatus('synced');result.restored=true;
-        }
-      }catch(e){/* sheet unreachable — carry on with local data */}
-    }
-    // 2) Re-read 90 days of Starling, bypassing the cache
-    if(settings.starlingToken){
-      Starling.init(settings.starlingToken,settings.starlingSandbox,settings.sheetsUrl);
-      let txns=null;
-      try{txns=await Starling.fetchRecent(90);}catch(e){result.err=e.status===403?'Starling token rejected (403) — check scopes in Settings.':e.status===401?'Starling token expired (401) — regenerate it in Settings.':'Could not reach Starling: '+(e.message||'network');}
-      if(txns){
-        LS.set('mhq-starling-cache',{t:Date.now(),sandbox:!!settings.starlingSandbox,txns});
-        const inTxns=txns.filter(t=>t.direction==='IN'&&t.amount>0);
-        const outTxns=txns.filter(t=>t.direction==='OUT'&&t.amount>0);
-        const unpaid=curInvoices.filter(i=>i.status!=='paid');
-        const{matches,usedTxnIds}=matchInvoicesToTxns(inTxns,unpaid);
-        // incoming payments that aren't already tied to an invoice/receipt
-        const linkedIn=new Set([...curInvoices.filter(i=>i.starlingTxnId).map(i=>i.starlingTxnId),...curReceipts.filter(r=>r.starlingTxnId).map(r=>r.starlingTxnId),...[...usedTxnIds]]);
-        const unmatched=inTxns.filter(t=>!linkedIn.has(t.id));
-        // outgoing card spend not yet tagged (as a business expense, or dismissed as personal/not-income)
-        const tagged=new Set([...curReceipts.filter(r=>r.starlingTxnId).map(r=>r.starlingTxnId),...(LS.get('mhq-feed-personal')||[]),...(LS.get('mhq-feed-not-income')||[])]);
-        const untagged=outTxns.filter(t=>!tagged.has(t.id));
-        setStarlingQueue(q=>({...q,matches,unmatched,lastSync:new Date()}));
-        result.matched=matches.length;result.uninvoiced=unmatched.length;result.untagged=untagged.length;
-      }
-      // refresh the balance/pots snapshot too
-      try{const snap=await Starling.fetchMoney();if(snap){LS.set('mhq-money-cache',{t:Date.now(),sandbox:!!settings.starlingSandbox,snap});result.balance=true;}}catch(e){}
-    }else if(!result.err){result.err='No Starling token connected — add it in Settings to sync your card.';}
-  }finally{
-    result.at=new Date();
-    setAlignResult(result);setAligning(false);
-  }
 };
 
 const testConn=async()=>{Sheets.init(settings.sheetsUrl||'');return await Sheets.testDiag();};
@@ -3440,10 +2314,17 @@ const runFolderAlign=async()=>{
     let p=null;try{p=await aiScanImage(fl.imageData,isPdf,settings.anthropicKey);}catch(e){}
     cands.push(p&&p.amount?{...fl,date:p.date,amount:p.amount,vendor:p.vendor,description:p.description||p.vendor,subcategory:p.subcategory,ok:true}:{...fl,ok:false});
   }
+  const acceptedInBatch=[];
   cands.forEach(c=>{
     if(!(c.ok&&c.amount)){c.dup=false;return;}
-    if(c.folder==='invoice')c.dup=invoices.some(iv=>Math.abs((iv.subtotal||0)-c.amount)<0.02&&datesClose(iv.date,c.date));
-    else c.dup=receipts.some(r=>r.category===c.folder&&Math.abs((r.amount||0)-c.amount)<0.02&&datesClose(r.date,c.date));
+    let dup;
+    if(c.folder==='invoice')dup=invoices.some(iv=>Math.abs((iv.subtotal||0)-c.amount)<0.02&&datesClose(iv.date,c.date));
+    else dup=receipts.some(r=>r.category===c.folder&&Math.abs((r.amount||0)-c.amount)<0.02&&datesClose(r.date,c.date));
+    // Also dedup against other candidates already accepted in THIS scan — so duplicate image
+    // files of the same receipt collapse to a single row instead of one row per copy.
+    if(!dup)dup=acceptedInBatch.some(a=>a.folder===c.folder&&Math.abs((a.amount||0)-c.amount)<0.02&&datesClose(a.date,c.date)&&(a.description||a.vendor||'').toLowerCase().trim()===(c.description||c.vendor||'').toLowerCase().trim());
+    c.dup=dup;
+    if(!dup)acceptedInBatch.push(c);
   });
   setIngesting(false);setIngestMsg('');setIngestFound(cands);
 };
@@ -3463,8 +2344,6 @@ const go=(v,type)=>{
   if(v==='add') setAddType(type||'timed');
   setView(v);
 };
-// Called from Bank Feed when user hits "Make Invoice" or "Log (no invoice)" on an IN txn
-const handleFeedIncomeTxn=(txn,mode)=>{setPendingFeedTxn({txn,mode});setView('invoice');};
 
 const addE=e=>setEntries(p=>[{...e,id:mkId(),createdAt:new Date().toISOString()},...p]);
 const toTrash=(kind,items)=>{if(!items.length)return;const now=new Date().toISOString();setTrash(p=>[...items.map(it=>({tid:mkId(),kind,deletedAt:now,item:it})),...p]);};
@@ -3496,7 +2375,7 @@ const importOld=(data,allTime)=>{
   let gotSettings=false;
   if(data.settings){
     const s=data.settings;
-    const keep=['name','business','email','bankDetails','payRef','anthropicKey','starlingToken','starlingSandbox','taxPercent','starlingTaxSpaceUid','starlingTaxSpaceName','starlingAccountUid','starlingDefaultCategoryUid','holidayPayPercent','starlingHolidaySpaceUid','starlingHolidaySpaceName','defaultRate','starlingPotsTrackOnly','starlingTaxSavingsUid','starlingTaxSavingsSortCode','starlingTaxSavingsAccountNumber','starlingTaxSavingsName','starlingHolidaySavingsUid','starlingHolidaySavingsSortCode','starlingHolidaySavingsAccountNumber','starlingHolidaySavingsName'];
+    const keep=['name','business','email','bankDetails','payRef','anthropicKey','taxPercent','holidayPayPercent','defaultRate'];
     setSettings(prev=>{
       const out={...prev};
       keep.forEach(k=>{const empty=out[k]===''||out[k]===undefined||out[k]===null;if(s[k]!==undefined&&s[k]!==''&&s[k]!==null&&empty)out[k]=s[k];});
@@ -3518,12 +2397,11 @@ const emptyTrash=()=>{if(window.confirm('Permanently delete everything in Trash?
 if(!booted){return(<div style={{background:T.bg,minHeight:'100vh',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:16,color:T.textMuted}}><div style={{width:36,height:36,border:`3px solid ${T.border}`,borderTopColor:T.accent,borderRadius:'50%',animation:'spin 0.8s linear infinite'}}/><div style={{fontSize:13,fontWeight:700,letterSpacing:1}}>Loading…</div></div>);}
 
 return(<div style={{background:T.bg,minHeight:'100vh',maxWidth:480,margin:'0 auto',fontFamily:'"DM Sans",-apple-system,sans-serif',color:T.text,paddingBottom:72,overflowX:'hidden'}}>
-  {view==='home'&&<HomeView entries={entries} receipts={receipts} invoices={invoices} setView={go} syncStatus={syncStatus} lastSynced={lastSynced} onSync={syncFromSheets} onAlign={runFolderAlign} aligning={ingesting} alignResult={alignResult} sheetsUrl={settings.sheetsUrl} starlingQueue={starlingQueue} settings={settings} oldDataAvailable={oldDataAvailable}/>}
-  {view==='feed'&&<FeedView receipts={receipts} invoices={invoices} entries={entries} settings={settings} onAddReceipt={addR} onUpdateReceipt={updR} sheetsUrl={settings.sheetsUrl} setView={go} onIncomeTxn={handleFeedIncomeTxn} onDeleteEntry={delE}/>}
+  {view==='home'&&<HomeView entries={entries} receipts={receipts} invoices={invoices} setView={go} syncStatus={syncStatus} lastSynced={lastSynced} onSync={syncFromSheets} onAlign={runFolderAlign} aligning={ingesting} alignResult={alignResult} sheetsUrl={settings.sheetsUrl} settings={settings} oldDataAvailable={oldDataAvailable}/>}
   {view==='add'&&<AddView onAdd={addE} settings={settings} initialType={addType} back={()=>setView('home')}/>}
   {view==='log'&&<LogView entries={entries} onDelete={delE} onToggleStatus={toggleStatus} onToggleVoid={toggleVoid} onAdd={addE}/>}
   {view==='receipts'&&<ReceiptsView receipts={receipts} onAdd={addR} onUpdate={updR} onDelete={delR} settings={settings} sheetsUrl={settings.sheetsUrl} onSync={syncFromSheets} pendingFile={pendingFile} onConsumePending={()=>setPendingFile(null)}/>}
-  {view==='invoice'&&<InvoiceView entries={entries} receipts={receipts} invoices={invoices} clients={clients} onAddInvoice={addI} onUpdateInvoice={updI} onDeleteInvoice={delI} onUpdateReceipt={updR} onSaveClient={addClient} onAddEntry={addE} settings={settings} setSettings={setSettings} sheetsUrl={settings.sheetsUrl} starlingQueue={starlingQueue} setStarlingQueue={setStarlingQueue} pendingFeedTxn={pendingFeedTxn} setPendingFeedTxn={setPendingFeedTxn}/>}
+  {view==='invoice'&&<InvoiceView entries={entries} receipts={receipts} invoices={invoices} clients={clients} onAddInvoice={addI} onUpdateInvoice={updI} onDeleteInvoice={delI} onUpdateReceipt={updR} onSaveClient={addClient} onAddEntry={addE} settings={settings} setSettings={setSettings} sheetsUrl={settings.sheetsUrl}/>}
   {view==='reports'&&<ReportsView entries={entries} receipts={receipts} invoices={invoices} settings={settings}/>}
   {view==='settings'&&<SettingsView settings={settings} setSettings={setSettings} syncStatus={syncStatus} onTest={testConn} onSyncFromSheets={syncFromSheets} clients={clients} onAddClient={addClient} onDelClient={delClient} onClearEntries={clearEntries} onClearReceipts={clearReceipts} onClearInvoices={clearInvoices} onImportOld={importOld} trash={trash} onRestoreTrash={restoreTrash} onPurgeTrashItem={purgeTrashItem} onEmptyTrash={emptyTrash}/>}
   {ingestMsg&&<div style={{position:'fixed',bottom:84,left:'50%',transform:'translateX(-50%)',background:T.text,color:T.bg,padding:'10px 16px',borderRadius:12,fontSize:13,fontWeight:700,zIndex:300,maxWidth:'88%',textAlign:'center',boxShadow:'0 6px 20px rgba(0,0,0,.22)'}}>{ingestMsg}</div>}
@@ -3546,6 +2424,7 @@ return(<div style={{background:T.bg,minHeight:'100vh',maxWidth:480,margin:'0 aut
     </div>
   </div>);})()}
   <input ref={camGlobalRef} type="file" accept="image/*" capture="environment" style={{display:'none'}} onChange={e=>{const file=e.target.files&&e.target.files[0];e.target.value='';if(file){setPendingFile(file);go('receipts');}}}/>
+  <button onClick={()=>go(view==='settings'?'home':'settings')} aria-label="Settings" style={{position:'fixed',top:10,right:'max(14px,calc(50% - 226px))',zIndex:160,width:38,height:38,borderRadius:'50%',background:T.surface,border:`1px solid ${T.border}`,boxShadow:'0 1px 4px rgba(0,0,0,.10)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}><I n={view==='settings'?'chevL':'settings'} sz={20} c={view==='settings'?T.accent:T.textMuted}/></button>
   <Nav view={view} setView={go} onSnap={snapPhoto}/>
 </div>);}
 
